@@ -1,15 +1,21 @@
 import os, time, threading, requests
 from flask import Flask, jsonify
 app = Flask(__name__)
-WALLET = "0x26437896ed9dfeb2f69765edcafe8fdceaab39ae"
+
+WALLETS = {
+    "0x26437896ed9dfeb2f69765edcafe8fdceaab39ae": "#0X26",
+    "0x033f0346c007323030eb420305ffede19a95618e": "#0X03",
+    "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",
+}
+
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 DISCORD_USER_ID = "221025359884320770"
 POLL_INTERVAL = 20
 seen_hashes = set()
 
-def get_recent_trades():
+def get_recent_trades(wallet):
     resp = requests.get("https://data-api.polymarket.com/activity",
-        params={"user": WALLET, "limit": 10}, timeout=10)
+        params={"user": wallet, "limit": 10}, timeout=10)
     return resp.json() if resp.ok else []
 
 def price_to_american(price):
@@ -17,14 +23,14 @@ def price_to_american(price):
     if price >= 0.5: return f"-{round(price / (1 - price) * 100)}"
     return f"+{round((1 - price) / price * 100)}"
 
-def send_discord_alert(trade):
+def send_discord_alert(trade, label):
     side = trade.get("side", "")
     if side not in ("BUY", "SELL"): return
     emoji = "U0001f7e2" if side == "BUY" else "U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
     content = (f"<@{DISCORD_USER_ID}>
 "
-        f"{emoji} **{action} — #0X26 (Sharp)**
+        f"{emoji} **{action} — {label} (Sharp)**
 "
         f"**{trade.get('title')}**
 "
@@ -36,18 +42,20 @@ def send_discord_alert(trade):
     requests.post(DISCORD_WEBHOOK, json={"content": content}, timeout=5)
 
 def monitor_loop():
-    for t in get_recent_trades(): seen_hashes.add(t.get("transactionHash",""))
+    for wallet in WALLETS:
+        for t in get_recent_trades(wallet): seen_hashes.add(t.get("transactionHash",""))
     while True:
         time.sleep(POLL_INTERVAL)
-        for trade in reversed(get_recent_trades()):
-            tx = trade.get("transactionHash","")
-            if tx and tx not in seen_hashes:
-                seen_hashes.add(tx)
-                if trade.get("type") == "TRADE": send_discord_alert(trade)
+        for wallet, label in WALLETS.items():
+            for trade in reversed(get_recent_trades(wallet)):
+                tx = trade.get("transactionHash","")
+                if tx and tx not in seen_hashes:
+                    seen_hashes.add(tx)
+                    if trade.get("type") == "TRADE": send_discord_alert(trade, label)
 
 _thread = threading.Thread(target=monitor_loop, daemon=True)
 _thread.start()
 
 @app.route("/")
 @app.route("/health")
-def health(): return jsonify({"status":"running","wallet":WALLET,"seen_trades":len(seen_hashes)})
+def health(): return jsonify({"status":"running","wallets":list(WALLETS.values()),"seen_trades":len(seen_hashes)})
