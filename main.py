@@ -26,6 +26,10 @@ def price_to_american(price):
 def send_discord_alert(trade, label):
     side = trade.get("side", "")
     if side not in ("BUY", "SELL"): return
+    # Skip combo/multi markets — no slug or outcome
+    event_slug = trade.get("eventSlug", "")
+    outcome = trade.get("outcome", "")
+    if not event_slug or not outcome: return
     emoji = "U0001f7e2" if side == "BUY" else "U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
     content = (f"<@{DISCORD_USER_ID}>
@@ -34,12 +38,15 @@ def send_discord_alert(trade, label):
 "
         f"**{trade.get('title')}**
 "
-        f"{side} **{trade.get('outcome')}** @ {round(trade.get('price',0)*100,1)}¢  ({price_to_american(trade.get('price',0))})
+        f"{side} **{outcome}** @ {round(trade.get('price',0)*100,1)}¢  ({price_to_american(trade.get('price',0))})
 "
         f"Size: **${trade.get('usdcSize',0):,.0f}**
 "
-        f"<https://polymarket.com/event/{trade.get('eventSlug','')}>")
-    requests.post(DISCORD_WEBHOOK, json={"content": content}, timeout=5)
+        f"<https://polymarket.com/event/{event_slug}>")
+    requests.post(DISCORD_WEBHOOK, json={
+        "content": content,
+        "allowed_mentions": {"users": [DISCORD_USER_ID]}
+    }, timeout=5)
 
 def monitor_loop():
     for wallet in WALLETS:
