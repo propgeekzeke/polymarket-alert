@@ -11,6 +11,7 @@ WALLETS = {
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 DISCORD_USER_ID = "221025359884320770"
 POLL_INTERVAL = 20
+MIN_SIZE = 1000
 seen_hashes = set()
 
 def get_recent_trades(wallet):
@@ -29,12 +30,13 @@ def send_discord_alert(trade, label):
     event_slug = trade.get("eventSlug", "")
     outcome = trade.get("outcome", "")
     if not event_slug or not outcome: return
+    if trade.get('usdcSize', 0) < MIN_SIZE: return
     emoji = "U0001f7e2" if side == "BUY" else "U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
     content = (f"<@{DISCORD_USER_ID}>\n"
         f"{emoji} **{action} — {label} (Sharp)**\n"
         f"**{trade.get('title')}**\n"
-        f"{side} **{outcome}** @ {round(trade.get('price',0)*100,1)}¢  ({price_to_american(trade.get('price',0))})\n"
+        f"{side} **{outcome}** @ {round(trade.get('price',0)*100,1)}\u00a2  ({price_to_american(trade.get('price',0))})\n"
         f"Size: **${trade.get('usdcSize',0):,.0f}**\n"
         f"<https://polymarket.com/event/{event_slug}>")
     requests.post(DISCORD_WEBHOOK, json={
@@ -59,4 +61,4 @@ _thread.start()
 
 @app.route("/")
 @app.route("/health")
-def health(): return jsonify({"status":"running","wallets":list(WALLETS.values()),"seen_trades":len(seen_hashes)})
+def health(): return jsonify({"status":"running","wallets":list(WALLETS.values()),"min_size":MIN_SIZE,"seen_trades":len(seen_hashes)})
