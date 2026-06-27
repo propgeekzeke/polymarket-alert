@@ -3,7 +3,7 @@ from flask import Flask, jsonify
 app = Flask(__name__)
 
 WALLETS = {
-    "0x26437896ed9dfeb2f69765edcafe8fdceaab39ae": "#0X26",
+    "0x26437896ed9dfeb2f69765edcafe8fdceaab39ae": "#Latina",
     "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BTB",
 }
@@ -32,13 +32,13 @@ def send_discord_alert(trade, label, wallet):
     outcome = trade.get("outcome", "")
     if not event_slug or not outcome: return
     fill_size = trade.get("usdcSize", 0)
-    if fill_size < MIN_SIZE: return
     key = (wallet, event_slug, outcome)
     if side == "BUY":
         position_totals[key] = position_totals.get(key, 0) + fill_size
     else:
         position_totals[key] = position_totals.get(key, 0) - fill_size
     total = position_totals[key]
+    if fill_size < MIN_SIZE: return
     emoji = "\U0001f7e2" if side == "BUY" else "\U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
     content = (f"<@{DISCORD_USER_ID}>\n"
