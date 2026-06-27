@@ -5,6 +5,7 @@ app = Flask(__name__)
 WALLETS = {
     "0x26437896ed9dfeb2f69765edcafe8fdceaab39ae": "#0X26",
     "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",
+    "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BTB",
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -12,6 +13,7 @@ DISCORD_USER_ID = "221025359884320770"
 POLL_INTERVAL = 20
 MIN_SIZE = 1000
 seen_hashes = set()
+position_totals = {}  # (wallet, eventSlug, outcome) -> running USDC total
 
 def get_recent_trades(wallet):
     resp = requests.get("https://data-api.polymarket.com/activity",
@@ -23,20 +25,27 @@ def price_to_american(price):
     if price >= 0.5: return f"-{round(price / (1 - price) * 100)}"
     return f"+{round((1 - price) / price * 100)}"
 
-def send_discord_alert(trade, label):
+def send_discord_alert(trade, label, wallet):
     side = trade.get("side", "")
     if side not in ("BUY", "SELL"): return
     event_slug = trade.get("eventSlug", "")
     outcome = trade.get("outcome", "")
     if not event_slug or not outcome: return
-    if trade.get('usdcSize', 0) < MIN_SIZE: return
-    emoji = "U0001f7e2" if side == "BUY" else "U0001f534"
+    fill_size = trade.get("usdcSize", 0)
+    if fill_size < MIN_SIZE: return
+    key = (wallet, event_slug, outcome)
+    if side == "BUY":
+        position_totals[key] = position_totals.get(key, 0) + fill_size
+    else:
+        position_totals[key] = position_totals.get(key, 0) - fill_size
+    total = position_totals[key]
+    emoji = "\U0001f7e2" if side == "BUY" else "\U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
     content = (f"<@{DISCORD_USER_ID}>\n"
         f"{emoji} **{action} — {label} (Sharp)**\n"
         f"**{trade.get('title')}**\n"
         f"{side} **{outcome}** @ {round(trade.get('price',0)*100,1)}\u00a2  ({price_to_american(trade.get('price',0))})\n"
-        f"Size: **${trade.get('usdcSize',0):,.0f}**\n"
+        f"Fill: **${fill_size:,.0f}** | Total position: **${total:,.0f}**\n"
         f"<https://polymarket.com/event/{event_slug}>")
     requests.post(DISCORD_WEBHOOK, json={
         "content": content,
@@ -53,7 +62,7 @@ def monitor_loop():
                 tx = trade.get("transactionHash","")
                 if tx and tx not in seen_hashes:
                     seen_hashes.add(tx)
-                    if trade.get("type") == "TRADE": send_discord_alert(trade, label)
+                    if trade.get("type") == "TRADE": send_discord_alert(trade, label, wallet)
 
 _thread = threading.Thread(target=monitor_loop, daemon=True)
 _thread.start()
