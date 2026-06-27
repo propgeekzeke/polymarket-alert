@@ -4,7 +4,6 @@ app = Flask(__name__)
 
 WALLETS = {
     "0x26437896ed9dfeb2f69765edcafe8fdceaab39ae": "#0X26",
-    "0x0346afae2603313d2bbee96b628536c8cbe352a5": "#0X03",
     "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",
 }
 
