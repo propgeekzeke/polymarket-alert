@@ -47,7 +47,7 @@ def send_discord_alert(trade, label, wallet):
         f"{side} **{outcome}** @ {round(trade.get('price',0)*100,1)}\u00a2  ({price_to_american(trade.get('price',0))})\n"
         f"Fill: **${fill_size:,.0f}** | Total position: **${total:,.0f}**\n"
         f"<https://polymarket.com/event/{event_slug}>\n"
-        f"<https://polymarket.com/profile/{wallet}>")
+        f"<https://polymarket.com/@{wallet}>")
     requests.post(DISCORD_WEBHOOK, json={
         "content": content,
         "allowed_mentions": {"users": [DISCORD_USER_ID]}
