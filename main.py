@@ -15,6 +15,9 @@ MIN_SIZE = 1000
 seen_hashes = set()
 position_totals = {}  # (wallet, eventSlug, outcome) -> running USDC total
 
+_thread = None
+_thread_lock = threading.Lock()
+
 def get_recent_trades(wallet):
     try:
         resp = requests.get("https://data-api.polymarket.com/activity",
@@ -66,7 +69,7 @@ def monitor_loop():
     for wallet in WALLETS:
         for t in get_recent_trades(wallet):
             seen_hashes.add(t.get("transactionHash", ""))
-    print(f"Bot started. Seeded {len(seen_hashes)} trade hashes.", flush=True)
+    print(f"Bot started in pid={os.getpid()}. Seeded {len(seen_hashes)} trade hashes.", flush=True)
     while True:
         try:
             time.sleep(POLL_INTERVAL)
@@ -84,9 +87,28 @@ def monitor_loop():
             print(f"Monitor loop error: {e}", flush=True)
             time.sleep(5)
 
-_thread = threading.Thread(target=monitor_loop, daemon=True)
-_thread.start()
+def ensure_monitor():
+    """Start or restart the monitor thread if not alive in this process."""
+    global _thread
+    with _thread_lock:
+        if _thread is None or not _thread.is_alive():
+            print(f"Starting monitor thread in pid={os.getpid()}", flush=True)
+            _thread = threading.Thread(target=monitor_loop, daemon=True)
+            _thread.start()
+
+# Attempt to start at import time (works when module loads in the worker process)
+ensure_monitor()
 
 @app.route("/")
 @app.route("/health")
-def health(): return jsonify({"status":"running","wallets":list(WALLETS.values()),"min_size":MIN_SIZE,"seen_trades":len(seen_hashes)})
+def health():
+    # Re-start thread if gunicorn forked after module load (gthread pre-load issue)
+    ensure_monitor()
+    return jsonify({
+        "status": "running",
+        "wallets": list(WALLETS.values()),
+        "min_size": MIN_SIZE,
+        "seen_trades": len(seen_hashes),
+        "thread_alive": _thread.is_alive() if _thread else False,
+        "pid": os.getpid()
+    })
