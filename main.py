@@ -16,9 +16,15 @@ seen_hashes = set()
 position_totals = {}  # (wallet, eventSlug, outcome) -> running USDC total
 
 def get_recent_trades(wallet):
-    resp = requests.get("https://data-api.polymarket.com/activity",
-        params={"user": wallet, "limit": 10}, timeout=10)
-    return resp.json() if resp.ok else []
+    try:
+        resp = requests.get("https://data-api.polymarket.com/activity",
+            params={"user": wallet, "limit": 10}, timeout=10)
+        if not resp.ok:
+            return []
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 def price_to_american(price):
     if price <= 0 or price >= 1: return "N/A"
@@ -44,26 +50,39 @@ def send_discord_alert(trade, label, wallet):
     content = (f"<@{DISCORD_USER_ID}>\n"
         f"{emoji} **{action} — {label} (Sharp)**\n"
         f"**{trade.get('title')}**\n"
-        f"{side} **{outcome}** @ {round(trade.get('price',0)*100,1)}\u00a2  ({price_to_american(trade.get('price',0))})\n"
+        f"{side} **{outcome}** @ {round(trade.get('price',0)*100,1)}¢  ({price_to_american(trade.get('price',0))})\n"
         f"Fill: **${fill_size:,.0f}** | Total position: **${total:,.0f}**\n"
         f"<https://polymarket.com/event/{event_slug}>\n"
         f"<https://polymarket.com/@{wallet}>")
-    requests.post(DISCORD_WEBHOOK, json={
-        "content": content,
-        "allowed_mentions": {"users": [DISCORD_USER_ID]}
-    }, timeout=5)
+    try:
+        requests.post(DISCORD_WEBHOOK, json={
+            "content": content,
+            "allowed_mentions": {"users": [DISCORD_USER_ID]}
+        }, timeout=5)
+    except Exception:
+        pass
 
 def monitor_loop():
     for wallet in WALLETS:
-        for t in get_recent_trades(wallet): seen_hashes.add(t.get("transactionHash",""))
+        for t in get_recent_trades(wallet):
+            seen_hashes.add(t.get("transactionHash", ""))
+    print(f"Bot started. Seeded {len(seen_hashes)} trade hashes.", flush=True)
     while True:
-        time.sleep(POLL_INTERVAL)
-        for wallet, label in WALLETS.items():
-            for trade in reversed(get_recent_trades(wallet)):
-                tx = trade.get("transactionHash","")
-                if tx and tx not in seen_hashes:
-                    seen_hashes.add(tx)
-                    if trade.get("type") == "TRADE": send_discord_alert(trade, label, wallet)
+        try:
+            time.sleep(POLL_INTERVAL)
+            for wallet, label in WALLETS.items():
+                try:
+                    for trade in reversed(get_recent_trades(wallet)):
+                        tx = trade.get("transactionHash", "")
+                        if tx and tx not in seen_hashes:
+                            seen_hashes.add(tx)
+                            if trade.get("type") == "TRADE":
+                                send_discord_alert(trade, label, wallet)
+                except Exception as e:
+                    print(f"Error polling {label}: {e}", flush=True)
+        except Exception as e:
+            print(f"Monitor loop error: {e}", flush=True)
+            time.sleep(5)
 
 _thread = threading.Thread(target=monitor_loop, daemon=True)
 _thread.start()
