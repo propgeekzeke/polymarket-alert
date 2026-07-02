@@ -17,6 +17,7 @@ position_totals = {}  # (wallet, eventSlug, outcome) -> running USDC total
 
 _thread = None
 _thread_lock = threading.Lock()
+_seeded = False  # track whether we've seeded seen_hashes yet
 
 def get_recent_trades(wallet):
     try:
@@ -66,10 +67,8 @@ def send_discord_alert(trade, label, wallet):
         pass
 
 def monitor_loop():
-    for wallet in WALLETS:
-        for t in get_recent_trades(wallet):
-            seen_hashes.add(t.get("transactionHash", ""))
-    print(f"Bot started in pid={os.getpid()}. Seeded {len(seen_hashes)} trade hashes.", flush=True)
+    """Polling loop only — seeding is done synchronously in ensure_monitor()."""
+    print(f"Monitor thread running in pid={os.getpid()}", flush=True)
     while True:
         try:
             time.sleep(POLL_INTERVAL)
@@ -88,21 +87,37 @@ def monitor_loop():
             time.sleep(5)
 
 def ensure_monitor():
-    """Start or restart the monitor thread if not alive in this process."""
-    global _thread
+    """Seed seen_hashes synchronously (in calling thread), then start poll thread.
+
+    Seeding MUST happen in the Flask request-handler thread, not in the daemon
+    thread. After a gunicorn gthread fork, daemon-thread network calls hang
+    indefinitely — but the request-handler thread works fine.
+    """
+    global _thread, _seeded
     with _thread_lock:
+        # Seed synchronously in the calling thread if not done yet in this process
+        if not _seeded:
+            for wallet in WALLETS:
+                for t in get_recent_trades(wallet):
+                    h = t.get("transactionHash", "")
+                    if h:
+                        seen_hashes.add(h)
+            _seeded = True
+            print(f"Seeded {len(seen_hashes)} hashes in pid={os.getpid()}", flush=True)
+
+        # Start/restart poll thread if needed
         if _thread is None or not _thread.is_alive():
-            print(f"Starting monitor thread in pid={os.getpid()}", flush=True)
             _thread = threading.Thread(target=monitor_loop, daemon=True)
             _thread.start()
 
-# Attempt to start at import time (works when module loads in the worker process)
+# Try at import time (works when module loads directly in the worker)
 ensure_monitor()
 
 @app.route("/")
 @app.route("/health")
 def health():
-    # Re-start thread if gunicorn forked after module load (gthread pre-load issue)
+    # Re-seeds and restarts thread in worker after gunicorn fork
+    # (gthread pre-loads in master; thread + seed state die on fork)
     ensure_monitor()
     return jsonify({
         "status": "running",
