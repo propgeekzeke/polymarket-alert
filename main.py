@@ -6,6 +6,7 @@ WALLETS = {
     "0x26437896ed9dfeb2f69765edcafe8fdceaab39ae": "#Latina",
     "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BTB",
+    "0xfea31bc088000ff909be1dfd8d0e3f2c7ef2d227": "#0XFE",
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
