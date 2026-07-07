@@ -51,7 +51,11 @@ def get_recent_trades(wallet):
 # ─── Wallet profiler ─────────────────────────────────────────────────────────
 
 def fetch_wallet_profile(wallet):
-    """Pull up to 500 trades for a wallet and compute summary stats."""
+    """Pull up to 500 trades for a wallet and compute summary stats.
+
+    avg_stake / max_stake are based on NET position size per (eventSlug, outcome)
+    — i.e. total BUYs minus total SELLs — not individual fill sizes.
+    """
     try:
         r = requests.get("https://data-api.polymarket.com/activity",
                          params={"user": wallet, "limit": 500}, timeout=15)
@@ -63,9 +67,10 @@ def fetch_wallet_profile(wallet):
         if not trades:
             return {}
 
-        sizes = [t["usdcSize"] for t in trades]
         months = set()
         cats = {}
+        # net USDC per (eventSlug, outcome) position
+        net_pos = {}
 
         for t in trades:
             ts = t.get("timestamp", 0)
@@ -75,14 +80,25 @@ def fetch_wallet_profile(wallet):
             cat = _slug_to_cat(slug)
             cats[cat] = cats.get(cat, 0) + 1
 
+            key = (slug, (t.get("outcome") or "").lower())
+            delta = t["usdcSize"] if t["side"] == "BUY" else -t["usdcSize"]
+            net_pos[key] = net_pos.get(key, 0) + delta
+
+        # Only count positions where net buy exposure was positive
+        position_sizes = [v for v in net_pos.values() if v > 0]
+        if not position_sizes:
+            # Fallback: use raw fill sizes if everything netted to zero
+            position_sizes = [t["usdcSize"] for t in trades]
+
         top_cats = [c for c, _ in sorted(cats.items(), key=lambda x: -x[1])[:3]]
 
         return {
-            "total_trades": len(trades),
-            "avg_stake":    round(statistics.mean(sizes)),
-            "max_stake":    round(max(sizes)),
+            "total_trades":  len(trades),
+            "num_positions": len(position_sizes),
+            "avg_stake":     round(statistics.mean(position_sizes)),
+            "max_stake":     round(max(position_sizes)),
             "months_active": len(months),
-            "top_cats":     top_cats,
+            "top_cats":      top_cats,
         }
     except Exception as e:
         print(f"Profile error {wallet[:8]}: {e}", flush=True)
@@ -294,8 +310,9 @@ def send_discord_alert(trade, label, wallet):
     # Wallet profile row
     if profile:
         cats = ", ".join(profile.get("top_cats", [])) or "—"
+        n_pos = profile.get("num_positions", "?")
         lines.append(
-            f"\U0001f4cb **{label}**: {profile['total_trades']} trades | "
+            f"\U0001f4cb **{label}**: {profile['total_trades']} fills / {n_pos} positions | "
             f"Avg ${profile['avg_stake']:,} / Max ${profile['max_stake']:,} | "
             f"{profile['months_active']}mo active | {cats}"
         )
