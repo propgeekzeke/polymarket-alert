@@ -280,6 +280,24 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         print(f"Pinnacle devig error: {e}", flush=True)
         return None
 
+# --- Futures filter ----------------------------------------------------------
+
+FUTURES_TITLE_KW = [
+    "to win the", "win the world cup", "win the cup", "win the championship",
+    "win the title", "win the league", "win the series", "win the tournament",
+    "who wins the", "outright winner", "wc winner", "world cup winner",
+]
+FUTURES_SLUG_KW = ["-winner", "winner-", "-champion", "champion-", "outright"]
+
+def _is_futures(title, slug):
+    t = (title or "").lower()
+    s = (slug or "").lower()
+    if any(kw in t for kw in FUTURES_TITLE_KW):
+        return True
+    if any(kw in s for kw in FUTURES_SLUG_KW):
+        return True
+    return False
+
 # --- Discord alert -----------------------------------------------------------
 
 def price_to_american(price):
@@ -295,6 +313,7 @@ def send_discord_alert(trade, label, wallet):
     outcome    = trade.get("outcome", "")
     title      = trade.get("title", "")
     if not event_slug or not outcome: return
+    if _is_futures(title, event_slug): return
 
     fill_size = trade.get("usdcSize", 0)
     price     = trade.get("price", 0)
