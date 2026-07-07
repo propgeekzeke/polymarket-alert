@@ -35,7 +35,7 @@ SPORT_MAP = [
     (["ufc-", "-ufc-"],                    "mma_mixed_martial_arts"),
 ]
 
-# ─── Polymarket API ──────────────────────────────────────────────────────────
+# --- Polymarket API ----------------------------------------------------------
 
 def get_recent_trades(wallet):
     try:
@@ -48,13 +48,14 @@ def get_recent_trades(wallet):
     except Exception:
         return []
 
-# ─── Wallet profiler ─────────────────────────────────────────────────────────
+# --- Wallet profiler ---------------------------------------------------------
 
 def fetch_wallet_profile(wallet):
-    """Pull up to 500 trades for a wallet and compute summary stats.
+    """Pull up to 500 activity records for a wallet and compute summary stats.
 
-    avg_stake / max_stake are based on NET position size per (eventSlug, outcome)
-    — i.e. total BUYs minus total SELLs — not individual fill sizes.
+    P&L = REDEEMs (winning payouts) + SELL proceeds - BUY costs.
+    avg_stake / max_stake use NET position size per (eventSlug, outcome),
+    not individual fill sizes.
     """
     try:
         r = requests.get("https://data-api.polymarket.com/activity",
@@ -62,47 +63,84 @@ def fetch_wallet_profile(wallet):
         if not r.ok:
             return {}
         raw = r.json()
-        trades = [t for t in (raw if isinstance(raw, list) else [])
-                  if t.get("side") in ("BUY", "SELL") and t.get("usdcSize", 0) > 0]
-        if not trades:
+        if not isinstance(raw, list) or not raw:
             return {}
 
         months = set()
+        month_pnl = {}   # "YYYY-MM" -> float net P&L
         cats = {}
-        # net USDC per (eventSlug, outcome) position
-        net_pos = {}
+        net_pos = {}     # (slug, outcome) -> net USDC (BUY positive, SELL negative)
+        total_cost = 0.0
+        total_proceeds = 0.0
 
-        for t in trades:
-            ts = t.get("timestamp", 0)
-            if ts:
-                months.add(datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m"))
+        for t in raw:
+            usdc = t.get("usdcSize", 0)
+            if not usdc or usdc <= 0:
+                continue
+            ts   = t.get("timestamp", 0)
+            mo   = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m") if ts else None
             slug = (t.get("eventSlug") or "").lower()
-            cat = _slug_to_cat(slug)
-            cats[cat] = cats.get(cat, 0) + 1
+            typ  = t.get("type", "")
+            side = t.get("side", "")
 
-            key = (slug, (t.get("outcome") or "").lower())
-            delta = t["usdcSize"] if t["side"] == "BUY" else -t["usdcSize"]
-            net_pos[key] = net_pos.get(key, 0) + delta
+            if mo:
+                months.add(mo)
 
-        # Only count positions where net buy exposure was positive
+            if typ == "TRADE" and side == "BUY":
+                total_cost += usdc
+                if mo:
+                    month_pnl[mo] = month_pnl.get(mo, 0) - usdc
+                cat = _slug_to_cat(slug)
+                cats[cat] = cats.get(cat, 0) + 1
+                key = (slug, (t.get("outcome") or "").lower())
+                net_pos[key] = net_pos.get(key, 0) + usdc
+
+            elif typ == "TRADE" and side == "SELL":
+                total_proceeds += usdc
+                if mo:
+                    month_pnl[mo] = month_pnl.get(mo, 0) + usdc
+                key = (slug, (t.get("outcome") or "").lower())
+                net_pos[key] = net_pos.get(key, 0) - usdc
+
+            elif typ == "REDEEM":
+                # Winning payout - counts as proceeds
+                total_proceeds += usdc
+                if mo:
+                    month_pnl[mo] = month_pnl.get(mo, 0) + usdc
+
+        all_trades = [t for t in raw if t.get("type") == "TRADE"
+                      and t.get("side") in ("BUY", "SELL") and t.get("usdcSize", 0) > 0]
+        if not all_trades:
+            return {}
+
+        # Net position sizes (positive = open or partially closed)
         position_sizes = [v for v in net_pos.values() if v > 0]
         if not position_sizes:
-            # Fallback: use raw fill sizes if everything netted to zero
-            position_sizes = [t["usdcSize"] for t in trades]
+            position_sizes = [t["usdcSize"] for t in all_trades]
 
         top_cats = [c for c, _ in sorted(cats.items(), key=lambda x: -x[1])[:3]]
 
+        total_pnl = total_proceeds - total_cost
+        roi_pct   = round(total_pnl / total_cost * 100, 1) if total_cost > 0 else 0
+        profitable_months = sum(1 for v in month_pnl.values() if v > 0)
+        total_months = len(month_pnl)
+
         return {
-            "total_trades":  len(trades),
-            "num_positions": len(position_sizes),
-            "avg_stake":     round(statistics.mean(position_sizes)),
-            "max_stake":     round(max(position_sizes)),
-            "months_active": len(months),
-            "top_cats":      top_cats,
+            "total_trades":      len(all_trades),
+            "num_positions":     len(position_sizes),
+            "avg_stake":         round(statistics.mean(position_sizes)),
+            "max_stake":         round(max(position_sizes)),
+            "months_active":     len(months),
+            "profitable_months": profitable_months,
+            "total_months":      total_months,
+            "total_pnl":         round(total_pnl),
+            "roi_pct":           roi_pct,
+            "top_cats":          top_cats,
         }
     except Exception as e:
         print(f"Profile error {wallet[:8]}: {e}", flush=True)
         return {}
+
 
 def _slug_to_cat(slug):
     if any(k in slug for k in ["mlb-", "-mlb"]):      return "MLB"
@@ -115,10 +153,10 @@ def _slug_to_cat(slug):
     if any(k in slug for k in ["ufc-", "-ufc"]):      return "UFC"
     return "Other"
 
-# ─── Market p90 ──────────────────────────────────────────────────────────────
+# --- Market p90 --------------------------------------------------------------
 
 def get_market_p90(event_slug, fill_size):
-    """Return (p90_value, multiple) for bets in this market. Both None on failure."""
+    """Return (p90_value, multiple). Both None on failure."""
     try:
         r = requests.get("https://data-api.polymarket.com/activity",
                          params={"eventSlug": event_slug, "limit": 200}, timeout=10)
@@ -137,7 +175,7 @@ def get_market_p90(event_slug, fill_size):
     except Exception:
         return None, None
 
-# ─── Pinnacle devig ──────────────────────────────────────────────────────────
+# --- Pinnacle devig ----------------------------------------------------------
 
 def _detect_sport_key(event_slug):
     slug = (event_slug or "").lower()
@@ -146,11 +184,9 @@ def _detect_sport_key(event_slug):
             return sport_key
     return None
 
+
 def get_pinnacle_devig(event_slug, title, outcome, pm_price):
-    """
-    Fetch Pinnacle odds, devig to fair probability, compare to pm_price.
-    Returns a dict or None if unavailable.
-    """
+    """Fetch Pinnacle odds, devig to fair probability, compare to pm_price."""
     if not ODDS_API_KEY:
         return None
     sport_key = _detect_sport_key(event_slug)
@@ -165,11 +201,11 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
             params={
-                "apiKey":      ODDS_API_KEY,
-                "bookmakers":  "pinnacle",
-                "markets":     market_type,
-                "regions":     "us",
-                "oddsFormat":  "american",
+                "apiKey":     ODDS_API_KEY,
+                "bookmakers": "pinnacle",
+                "markets":    market_type,
+                "regions":    "us",
+                "oddsFormat": "american",
             }, timeout=10)
         if not r.ok:
             print(f"Odds API {r.status_code}: {r.text[:120]}", flush=True)
@@ -178,7 +214,7 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         if not isinstance(games, list) or not games:
             return None
 
-        # Match game by overlapping words between PM title and home/away team names
+        # Match game by overlapping words in title vs home/away team names
         title_words = set(title_lower.replace("-", " ").split())
         best_game, best_score = None, 0
         for game in games:
@@ -210,7 +246,6 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         total = sum(raw_probs.values())
         fair = {k: v / total for k, v in raw_probs.items()}
 
-        # Match outcome string to a fair-prob entry
         outcome_lower = outcome.lower()
         fair_prob = fair.get(outcome_lower)
         if fair_prob is None:
@@ -221,11 +256,11 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         if fair_prob is None:
             return None
 
-        gap = round((pm_price - fair_prob) * 100, 2)   # positive = PM overpriced vs fair
-        agrees = pm_price <= fair_prob + 0.015          # buying at/below fair = agrees
+        gap = round((pm_price - fair_prob) * 100, 2)  # positive = PM overpriced vs fair
+        agrees = pm_price <= fair_prob + 0.015         # buying at/below fair = +EV
 
         if abs(gap) <= 1.5:
-            edge_label = "IN-LINE (validates wallet, no edge)"
+            edge_label = "IN-LINE"
         elif gap < -1.5:
             edge_label = f"EDGE +{abs(gap):.1f}pp below fair"
         else:
@@ -245,12 +280,13 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         print(f"Pinnacle devig error: {e}", flush=True)
         return None
 
-# ─── Discord alert ───────────────────────────────────────────────────────────
+# --- Discord alert -----------------------------------------------------------
 
 def price_to_american(price):
     if price <= 0 or price >= 1: return "N/A"
     if price >= 0.5: return f"-{round(price / (1 - price) * 100)}"
     return f"+{round((1 - price) / price * 100)}"
+
 
 def send_discord_alert(trade, label, wallet):
     side = trade.get("side", "")
@@ -272,55 +308,65 @@ def send_discord_alert(trade, label, wallet):
 
     if fill_size < MIN_SIZE: return
 
-    # ── Enrichment (runs in polling thread — network calls OK here) ──
+    # Enrichment
     _, p90_mult = get_market_p90(event_slug, fill_size)
     pin         = get_pinnacle_devig(event_slug, title, outcome, price)
     profile     = wallet_profiles.get(wallet, {})
 
-    # ── Build message ─────────────────────────────────────────────────
     emoji  = "\U0001f7e2" if side == "BUY" else "\U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
 
     lines = [
         f"<@{DISCORD_USER_ID}>",
-        f"{emoji} **{action} — {label} (Sharp)**",
+        f"{emoji} **{action} -- {label} (Sharp)**",
         f"**{title}**",
-        f"{side} **{outcome}** @ {round(price*100,1)}¢  ({price_to_american(price)})",
+        f"{side} **{outcome}** @ {round(price*100,1)}c  ({price_to_american(price)})",
         f"Fill: **${fill_size:,.0f}** | Total position: **${total:,.0f}**",
     ]
 
-    # Size / agrees row
+    # Size / EV row
     meta = []
     if p90_mult:
         meta.append(f"\U0001f4ca **{p90_mult}x p90**")
     if pin:
-        meta.append("✅ AGREES" if pin["agrees"] else "❌ DISAGREES")
+        ev_tag = "✅ **+EV vs Pinnacle**" if pin["agrees"] else "❌ **-EV vs Pinnacle**"
+        meta.append(ev_tag)
     if meta:
         lines.append("  |  ".join(meta))
 
-    # Anchor row
+    # Pinnacle anchor row
     if pin:
         gap_str = f"{'+' if pin['gap'] > 0 else ''}{pin['gap']}pp"
         lines.append(
-            f"\U0001f3af **ANCHOR**: Pinnacle fair {pin['fair']} vs PM {round(price,4)}"
-            f" → gap {gap_str} · **{pin['edge_label']}**"
+            f"\U0001f3af Pinnacle fair **{round(pin['fair']*100,1)}c** vs PM **{round(price*100,1)}c**"
+            f" -> **{gap_str}** - {pin['edge_label']}"
         )
-        lines.append(f"_{pin['method']} · {pin['home']} vs {pin['away']}_")
+        lines.append(f"_{pin['method']} - {pin['home']} vs {pin['away']}_")
 
     # Wallet profile row
     if profile:
-        cats = ", ".join(profile.get("top_cats", [])) or "—"
+        cats  = ", ".join(profile.get("top_cats", [])) or "-"
         n_pos = profile.get("num_positions", "?")
+        pnl   = profile.get("total_pnl", None)
+        roi   = profile.get("roi_pct", None)
+        p_mo  = profile.get("profitable_months", None)
+        t_mo  = profile.get("total_months", None)
+        if pnl is not None:
+            arrow = "▲" if pnl >= 0 else "▼"
+            sign  = "+" if pnl >= 0 else ""
+            pnl_str = f"{arrow} **${abs(pnl):,}** ({sign}{roi}% ROI)"
+        else:
+            pnl_str = ""
+        mo_str = f"{p_mo}/{t_mo} mo profitable" if p_mo is not None else ""
         lines.append(
             f"\U0001f4cb **{label}**: {profile['total_trades']} fills / {n_pos} positions | "
-            f"Avg ${profile['avg_stake']:,} / Max ${profile['max_stake']:,} | "
-            f"{profile['months_active']}mo active | {cats}"
+            f"Avg ${profile['avg_stake']:,} / Max ${profile['max_stake']:,} | {cats}"
         )
+        if pnl_str or mo_str:
+            sep = "  |  " if pnl_str and mo_str else ""
+            lines.append(f"  {pnl_str}{sep}{mo_str}")
 
-    lines += [
-        f"<https://polymarket.com/event/{event_slug}>",
-        f"<https://polymarket.com/@{wallet}>",
-    ]
+    lines.append(f"<https://polymarket.com/@{wallet}>")
 
     content = "\n".join(lines)
     try:
@@ -331,7 +377,7 @@ def send_discord_alert(trade, label, wallet):
     except Exception:
         pass
 
-# ─── Monitor loop ────────────────────────────────────────────────────────────
+# --- Monitor loop ------------------------------------------------------------
 
 def monitor_loop():
     print(f"Monitor thread running in pid={os.getpid()}", flush=True)
@@ -352,29 +398,24 @@ def monitor_loop():
             print(f"Monitor loop error: {e}", flush=True)
             time.sleep(5)
 
-# ─── Startup ─────────────────────────────────────────────────────────────────
+# --- Startup -----------------------------------------------------------------
 
 def ensure_monitor():
-    """
-    Seed seen_hashes + pre-fetch wallet profiles synchronously in the
-    Flask request-handler thread (safe post-gunicorn-fork), then start
-    the polling daemon thread.
-    """
+    """Seed seen_hashes + pre-fetch wallet profiles, then start polling thread."""
     global _thread, _seeded
     with _thread_lock:
         if not _seeded:
-            # Seed trade hashes
             for wallet in WALLETS:
                 for t in get_recent_trades(wallet):
                     h = t.get("transactionHash", "")
                     if h:
                         seen_hashes.add(h)
-            # Pre-fetch wallet profiles
             for wallet, label in WALLETS.items():
                 profile = fetch_wallet_profile(wallet)
                 wallet_profiles[wallet] = profile
                 print(f"Profile {label}: {profile.get('total_trades', 0)} trades, "
-                      f"top={profile.get('top_cats', [])}", flush=True)
+                      f"pnl=${profile.get('total_pnl', '?')}, "
+                      f"roi={profile.get('roi_pct', '?')}%", flush=True)
             _seeded = True
             print(f"Seeded {len(seen_hashes)} hashes in pid={os.getpid()}", flush=True)
 
@@ -382,7 +423,9 @@ def ensure_monitor():
             _thread = threading.Thread(target=monitor_loop, daemon=True)
             _thread.start()
 
+
 ensure_monitor()
+
 
 @app.route("/")
 @app.route("/health")
