@@ -270,7 +270,7 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
             return None
 
         gap = round((pm_price - fair_prob) * 100, 2)  # positive = PM overpriced vs fair
-        agrees = pm_price <= fair_prob + 0.015         # buying at/below fair = +EV
+        agrees = pm_price <= fair_prob                  # buying at/below fair = +EV
 
         if abs(gap) <= 1.5:
             edge_label = "IN-LINE"
