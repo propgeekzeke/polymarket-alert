@@ -253,6 +253,19 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
                 if outcome_lower in name or name in outcome_lower:
                     fair_prob = prob
                     break
+
+        # "No" market: find which team "Yes" maps to via title overlap, then No = 1 - Yes
+        if fair_prob is None and outcome_lower == "no":
+            best_team_prob, best_team_score = None, 0
+            for name, prob in fair.items():
+                if name == "draw":
+                    continue
+                score = len(title_words & set(name.replace("-", " ").split()))
+                if score > best_team_score:
+                    best_team_score, best_team_prob = score, prob
+            if best_team_prob is not None and best_team_score > 0:
+                fair_prob = 1.0 - best_team_prob
+
         if fair_prob is None:
             return None
 
@@ -437,7 +450,6 @@ def ensure_monitor():
                       f"roi={profile.get('roi_pct', '?')}%", flush=True)
             _seeded = True
             print(f"Seeded {len(seen_hashes)} hashes in pid={os.getpid()}", flush=True)
-
         if _thread is None or not _thread.is_alive():
             _thread = threading.Thread(target=monitor_loop, daemon=True)
             _thread.start()
