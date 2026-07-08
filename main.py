@@ -31,7 +31,7 @@ SPORT_MAP = [
     (["nba-", "-nba-", "/nba"],            "basketball_nba"),
     (["nfl-", "-nfl-", "/nfl"],            "americanfootball_nfl"),
     (["nhl-", "-nhl-", "/nhl"],            "icehockey_nhl"),
-    (["fifwc", "world-cup", "2026-fifa"],  "soccer_fifa_world_cup_2026"),
+    (["fifwc", "world-cup", "2026-fifa"],  "soccer_fifa_world_cup"),
     (["ufc-", "-ufc-"],                    "mma_mixed_martial_arts"),
 ]
 
