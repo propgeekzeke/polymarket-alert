@@ -56,19 +56,29 @@ def get_recent_trades(wallet):
 # --- Wallet profiler ---------------------------------------------------------
 
 def fetch_wallet_profile(wallet):
-    """Pull up to 500 activity records for a wallet and compute summary stats.
+    """Paginate through ALL activity records for a wallet and compute summary stats.
 
     P&L = REDEEMs (winning payouts) + SELL proceeds - BUY costs.
     avg_stake / max_stake use NET position size per (eventSlug, outcome),
     not individual fill sizes.
     """
     try:
-        r = requests.get("https://data-api.polymarket.com/activity",
-                         params={"user": wallet, "limit": 500}, timeout=15)
-        if not r.ok:
-            return {}
-        raw = r.json()
-        if not isinstance(raw, list) or not raw:
+        raw = []
+        offset = 0
+        while True:
+            r = requests.get("https://data-api.polymarket.com/activity",
+                             params={"user": wallet, "limit": 500, "offset": offset},
+                             timeout=15)
+            if not r.ok:
+                break
+            batch = r.json()
+            if not isinstance(batch, list) or not batch:
+                break
+            raw.extend(batch)
+            if len(batch) < 500:
+                break
+            offset += 500
+        if not raw:
             return {}
 
         months = set()
