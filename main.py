@@ -17,6 +17,11 @@ ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 POLL_INTERVAL = 20
 MIN_SIZE = 1000
 
+# Per-wallet minimum fill size overrides
+WALLET_MIN_SIZE = {
+    "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 10000,  # #BTB
+}
+
 seen_hashes = set()
 position_totals = {}   # (wallet, eventSlug, outcome) -> running USDC total
 wallet_profiles = {}   # wallet -> profile dict (cached)
@@ -338,7 +343,8 @@ def send_discord_alert(trade, label, wallet):
         position_totals[key] = position_totals.get(key, 0) - fill_size
     total = position_totals[key]
 
-    if fill_size < MIN_SIZE: return
+    min_size = WALLET_MIN_SIZE.get(wallet, MIN_SIZE)
+    if fill_size < min_size: return
 
     # Enrichment
     _, p90_mult = get_market_p90(event_slug, fill_size)
@@ -464,9 +470,6 @@ def health():
     ensure_monitor()
     return jsonify({
         "status":          "running",
-        "wallets":         list(WALLETS.values()),
-        "min_size":        MIN_SIZE,
-        "seen_trades":     len(seen_hashes),
         "thread_alive":    _thread.is_alive() if _thread else False,
         "pid":             os.getpid(),
         "pinnacle":        bool(ODDS_API_KEY),
