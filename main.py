@@ -518,27 +518,26 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
     emoji  = "\U0001f7e2" if side == "BUY" else "\U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
 
+    avg_stake = profile.get("avg_stake") if profile else None
+    if avg_stake:
+        mult = accumulated / avg_stake
+        bet_line = f"Bet **${accumulated:,.0f}**  ({mult:.1f}x their avg bet of ${avg_stake:,})"
+    else:
+        bet_line = f"Bet **${accumulated:,.0f}**"
+    if total and abs(total) > accumulated * 1.05:
+        bet_line += f"  |  position **${total:,.0f}**"
+
     lines = [
         f"<@{DISCORD_USER_ID}>",
         f"{emoji} **{action} -- {label} (Sharp)** | PRE-GAME ({_countdown(gs)})",
         f"**{title}**",
         f"{side} **{outcome}** @ {round(price*100,1)}c  ({price_to_american(price)})",
-        f"Fill: **${accumulated:,.0f}**{' (aggregated)' if accumulated > fill_size else ''} | Total position: **${total:,.0f}**",
+        bet_line,
     ]
-
-    if side == "BUY" and now_price is not None:
-        delta = (now_price - price) * 100
-        if delta <= TAIL_OK_PP:
-            verdict = "✅ **TAILABLE**"
-        elif delta <= TAIL_MEH_PP:
-            verdict = "⚠️ **MOVED - reduced edge**"
-        else:
-            verdict = "❌ **LINE GONE - skip**"
-        lines.append(f"Now **{round(now_price*100,1)}c** ({delta:+.1f}pp vs entry)  {verdict}")
 
     meta = []
     if p90_mult:
-        meta.append(f"\U0001f4ca **{p90_mult}x p90**")
+        meta.append(f"\U0001f4ca **{p90_mult}x mkt p90**")
     if pin:
         ev_tag = "✅ **+EV vs Pinnacle**" if pin["agrees"] else "❌ **-EV vs Pinnacle**"
         meta.append(ev_tag)
@@ -562,15 +561,13 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
             arrow = "▲" if pnl >= 0 else "▼"
             sign  = "+" if pnl >= 0 else ""
             lines.append(
-                f"\U0001f4cb **{label}**: {profile['total_trades']} fills | "
-                f"Avg ${profile['avg_stake']:,} / Max ${profile['max_stake']:,} | {cats} | "
-                f"{arrow} ${abs(pnl):,} ({sign}{roi}% ROI)"
+                f"\U0001f4cb **{label}**  ·  {arrow} **${abs(pnl):,}** ({sign}{roi}% ROI)  ·  "
+                f"{profile.get('num_positions', '?')} positions  ·  {cats}"
             )
     if my_clv:
-        lines.append(f"\U0001f4c8 Tracked CLV: **{my_clv['avg_clv_pp']:+.2f}pp** avg, "
-                     f"beats close **{my_clv['beat_close_pct']}%** (n={my_clv['n']})")
+        lines.append(f"\U0001f4c8 **CLV {my_clv['avg_clv_pp']:+.2f}%** avg  ·  "
+                     f"beats close **{my_clv['beat_close_pct']}%**  ·  n={my_clv['n']}")
 
-    lines.append(f"<https://polymarket.com/event/{event_slug}>")
     lines.append(f"<https://polymarket.com/@{wallet}>")
     _post_discord("\n".join(lines))
 
@@ -597,7 +594,6 @@ def send_consensus_alert(event_slug, outcome, title, book, trade):
         lines.append(f"Current price: **{round(now_price*100,1)}c** ({price_to_american(now_price)})")
     else:
         lines.append(f"Last fill: **{round(price*100,1)}c**")
-    lines.append(f"<https://polymarket.com/event/{event_slug}>")
     _post_discord("\n".join(lines))
 
 # --- Trade handling ----------------------------------------------------------
