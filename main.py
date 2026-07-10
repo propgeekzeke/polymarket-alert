@@ -415,7 +415,9 @@ def grade_pending_clv(max_grades=5):
             if now > gs + 7200:
                 e["failed"] = True
             continue
-        e["clv"] = round((close - e["entry"]) * 100, 2)
+        # EV-style CLV: closing price treated as true prob; entry is what you paid.
+        # (close / entry - 1) * 100  -> +% you beat the close in payout terms.
+        e["clv"] = round((close / e["entry"] - 1) * 100, 2) if e["entry"] > 0 else 0.0
         e["close"] = close
         graded += 1
         if graded >= max_grades:
