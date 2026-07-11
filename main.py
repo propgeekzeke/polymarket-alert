@@ -19,6 +19,14 @@ WALLETS = {
     "0x448861155279dbf833d041b963e3ac854599e319": "#Flipadelphia",  # $561k/590d grinder, MLB+Soc
     # Added 2026-07-11 (friend-flagged whale; elite P&L, in-line CLV on big bets - validate live)
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": "#Whale2c33",     # $6.2M/277d, +0.62% CLV avg (whale bets in-line), Soc+MLB
+    # Added 2026-07-11 (corrected-P&L re-run: beat close + real realized P&L)
+    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": "#VeryLucky888",  # CLV +1.58%, 71% beat, $412k, 89%mo-up, Soc/UFC/MLB
+    "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255": "#Airpods123",     # CLV +0.98%, 71% beat, $1.02M whale, Soc/NBA
+    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": "#Sharp2a2C",      # CLV +0.93%, 71% beat, $4.18M, Soc/NBA/NHL
+    "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": "#Gardiner",       # CLV +0.71%, 59% beat, $185k, Soc/Tennis/MLB
+    "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960": "#SportMaster",    # CLV +0.74% (tail small bets), $1.44M, MLB/Soc
+    "0xf1528f12e645462c344799b62b1b421a6a4c64aa": "#PhoneSculptor",  # CLV +0.58%, $772k, MLB/Soc, avg $18.6k
+    "0x204f72f35326db932158cba6adff0b9a1da95e14": "#SwissTony",      # $15.86M/+$6.4M-30d, CLV in-line - validate live
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -40,6 +48,13 @@ WALLET_MIN_SIZE = {
     "0xa80e584e189865e8289403bd96ed52d67e816aa1": 5000,   # #Allegiant (avg $7.2k)
     "0x448861155279dbf833d041b963e3ac854599e319": 5000,   # #Flipadelphia (avg $9.2k)
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 5000,   # #Whale2c33 (huge sizing; $5k gate)
+    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": 2500,   # #VeryLucky888 (avg $2.7k)
+    "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255": 10000,  # #Airpods123 (whale, avg $53.8k)
+    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": 10000,  # #Sharp2a2C (whale, avg $37k)
+    "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": 3000,   # #Gardiner (avg $3.2k)
+    "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960": 2000,   # #SportMaster (tail small bets; avg $2.1k)
+    "0xf1528f12e645462c344799b62b1b421a6a4c64aa": 8000,   # #PhoneSculptor (avg $18.6k)
+    "0x204f72f35326db932158cba6adff0b9a1da95e14": 10000,  # #SwissTony (whale, avg $33.9k)
 }
 
 # --- Runtime state -----------------------------------------------------------
