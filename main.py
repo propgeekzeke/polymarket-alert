@@ -50,6 +50,7 @@ consensus_book = {}      # (eventSlug, outcome) -> {wallet: total USDC}
 consensus_alerted = set()  # (eventSlug, outcome) already alerted
 alert_progress = {}      # (wallet, eventSlug, outcome, side) -> USDC accumulated since last alert
 clv_log = []             # alerted BUYs pending/graded vs closing line
+clv_baseline = {}        # wallet -> historical CLV stats (computed at startup, EV-style %)
 
 _thread = None
 _thread_lock = threading.Lock()
@@ -441,6 +442,58 @@ def clv_stats(wallet=None):
         del s["sum"], s["beat"]
     return out
 
+
+def compute_historical_clv(wallet, max_events=40):
+    """One-time baseline: EV-style CLV over a wallet's recent pre-game $1k+ sport bets."""
+    raw, offset = [], 0
+    while offset < 4000:
+        try:
+            r = requests.get("https://data-api.polymarket.com/activity",
+                             params={"user": wallet, "limit": 500, "offset": offset,
+                                     "type": "TRADE"}, timeout=15)
+            if not r.ok:
+                break
+            b = r.json()
+        except Exception:
+            break
+        if not isinstance(b, list) or not b:
+            break
+        raw.extend(b)
+        if len(b) < 500:
+            break
+        offset += 500
+    samples = {}
+    for t in raw:
+        if t.get("side") != "BUY" or t.get("usdcSize", 0) < 1000:
+            continue
+        slug = (t.get("eventSlug") or "").lower()
+        if not (slug.startswith("mlb-") or any(k in slug for k in
+                ("fifwc", "epl-", "lal-", "ucl-", "uel-", "sea-", "bun-", "li1-", "mls-"))):
+            continue
+        k = (slug, t.get("asset", ""))
+        s = samples.setdefault(k, {"stake": 0.0, "pxnum": 0.0, "first": t.get("timestamp", 0)})
+        s["stake"] += t["usdcSize"]
+        s["pxnum"] += t["usdcSize"] * t.get("price", 0)
+        s["first"] = min(s["first"], t.get("timestamp", 0))
+    items = sorted(samples.items(), key=lambda kv: -kv[1]["first"])[:max_events]
+    clvs = []
+    for (slug, asset), s in items:
+        gs = get_game_start(slug)
+        if not gs or not asset or s["first"] >= gs:
+            continue
+        close = get_closing_price(asset, gs)
+        if close is None or close <= 0.001 or close >= 0.999:
+            continue
+        vwap = s["pxnum"] / s["stake"]
+        if vwap <= 0:
+            continue
+        clvs.append((close / vwap - 1) * 100)
+    if not clvs:
+        return None
+    return {"avg_clv_pp": round(sum(clvs) / len(clvs), 2),
+            "beat_close_pct": round(sum(1 for c in clvs if c > 0) / len(clvs) * 100),
+            "n": len(clvs)}
+
 # --- State persistence -------------------------------------------------------
 
 def save_state():
@@ -450,6 +503,7 @@ def save_state():
                 "watermarks": watermarks,
                 "consensus_alerted": ["|".join(k) for k in consensus_alerted],
                 "clv_log": clv_log[-2000:],
+                "clv_baseline": clv_baseline,
             }, fh)
     except Exception:
         pass
@@ -466,6 +520,7 @@ def load_state():
             if len(parts) == 2:
                 consensus_alerted.add((parts[0], parts[1]))
         clv_log = d.get("clv_log", [])
+        clv_baseline.update(d.get("clv_baseline", {}))
         print(f"State loaded: {len(watermarks)} watermarks, {len(clv_log)} CLV entries", flush=True)
     except Exception:
         pass
@@ -515,7 +570,7 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
     _, p90_mult = get_market_p90(cid, accumulated)
     pin         = get_pinnacle_devig(event_slug, title, outcome, now_price or price)
     profile     = wallet_profiles.get(wallet, {})
-    my_clv      = clv_stats(wallet).get(wallet)
+    my_clv      = clv_baseline.get(wallet) or clv_stats(wallet).get(wallet)
 
     emoji  = "\U0001f7e2" if side == "BUY" else "\U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
@@ -640,6 +695,18 @@ def handle_trade(trade, label, wallet):
 
 def monitor_loop():
     print(f"Monitor thread running in pid={os.getpid()}", flush=True)
+    for wallet, label in WALLETS.items():
+        if wallet in clv_baseline:
+            continue
+        try:
+            base = compute_historical_clv(wallet)
+            if base:
+                clv_baseline[wallet] = base
+                print(f"CLV baseline {label}: {base['avg_clv_pp']:+.2f}% avg, "
+                      f"beats {base['beat_close_pct']}% (n={base['n']})", flush=True)
+        except Exception as e:
+            print(f"CLV baseline error {label}: {e}", flush=True)
+    save_state()
     cycles = 0
     while True:
         try:
