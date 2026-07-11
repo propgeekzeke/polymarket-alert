@@ -17,6 +17,8 @@ WALLETS = {
     "0x2a69660046d7acc4ab204d7cc5ba78b0776cd2f7": "#UpTheBlues",    # $524k, CLV +0.44pp, high volume, Soc
     "0xa80e584e189865e8289403bd96ed52d67e816aa1": "#Allegiant",     # $274k/29d, CLV +0.09pp, Soc
     "0x448861155279dbf833d041b963e3ac854599e319": "#Flipadelphia",  # $561k/590d grinder, MLB+Soc
+    # Added 2026-07-11 (friend-flagged whale; elite P&L, in-line CLV on big bets - validate live)
+    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": "#Whale2c33",     # $6.2M/277d, +0.62% CLV avg (whale bets in-line), Soc+MLB
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -37,6 +39,7 @@ WALLET_MIN_SIZE = {
     "0x2a69660046d7acc4ab204d7cc5ba78b0776cd2f7": 2500,   # #UpTheBlues (avg $2.4k pre-game; live noise now filtered)
     "0xa80e584e189865e8289403bd96ed52d67e816aa1": 5000,   # #Allegiant (avg $7.2k)
     "0x448861155279dbf833d041b963e3ac854599e319": 5000,   # #Flipadelphia (avg $9.2k)
+    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 5000,   # #Whale2c33 (huge sizing; $5k gate)
 }
 
 # --- Runtime state -----------------------------------------------------------
