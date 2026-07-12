@@ -416,6 +416,15 @@ def _is_futures(title, slug):
     s = (slug or "").lower()
     return any(kw in t for kw in FUTURES_TITLE_KW) or any(kw in s for kw in FUTURES_SLUG_KW)
 
+# Prop-market noise to skip (exact-score props generate tons of low-signal pings)
+PROP_SLUG_KW = ["exact-score", "correct-score"]
+PROP_TITLE_KW = ["exact score", "correct score"]
+
+def _is_prop_noise(title, slug):
+    t = (title or "").lower()
+    s = (slug or "").lower()
+    return any(kw in s for kw in PROP_SLUG_KW) or any(kw in t for kw in PROP_TITLE_KW)
+
 # --- CLV scoreboard ----------------------------------------------------------
 
 def grade_pending_clv(max_grades=5):
@@ -681,6 +690,8 @@ def handle_trade(trade, label, wallet):
     if not event_slug or not outcome:
         return
     if _is_futures(title, event_slug):
+        return
+    if _is_prop_noise(title, event_slug):
         return
 
     fill_size = trade.get("usdcSize", 0)
