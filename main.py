@@ -642,17 +642,23 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
         )
         lines.append(f"_{pin['method']} - {pin['home']} vs {pin['away']}_")
 
-    if profile:
-        cats  = ", ".join(profile.get("top_cats", [])) or "-"
-        pnl   = profile.get("total_pnl")
-        roi   = profile.get("roi_pct")
-        if pnl is not None:
-            arrow = "▲" if pnl >= 0 else "▼"
-            sign  = "+" if pnl >= 0 else ""
-            lines.append(
-                f"\U0001f4cb **{label}**  ·  {arrow} **${abs(pnl):,}** ({sign}{roi}% ROI)  ·  "
-                f"{profile.get('num_positions', '?')} positions  ·  {cats}"
-            )
+    off_pnl = get_official_pnl(wallet)
+    if off_pnl.get("all") is not None:
+        allp = off_pnl["all"]
+        d30  = off_pnl.get("d30", 0)
+        arrow = "▲" if allp >= 0 else "▼"
+        d30s  = f"{'+' if d30 >= 0 else '-'}${abs(d30):,} 30d"
+        cats  = ", ".join(profile.get("top_cats", [])) if profile else ""
+        line = f"\U0001f4cb **{label}**  ·  {arrow} **${abs(allp):,}** lifetime  ·  {d30s}"
+        if cats:
+            line += f"  ·  {cats}"
+        lines.append(line)
+    elif profile and profile.get("total_pnl") is not None:
+        pnl = profile.get("total_pnl"); roi = profile.get("roi_pct")
+        arrow = "▲" if pnl >= 0 else "▼"
+        sign = "+" if pnl >= 0 else ""
+        cats = ", ".join(profile.get("top_cats", [])) or "-"
+        lines.append(f"\U0001f4cb **{label}**  ·  {arrow} **${abs(pnl):,}** ({sign}{roi}% ROI)  ·  {cats}")
     if my_clv:
         lines.append(f"\U0001f4c8 **CLV {my_clv['avg_clv_pp']:+.2f}%** avg  ·  "
                      f"beats close **{my_clv['beat_close_pct']}%**  ·  n={my_clv['n']}")
