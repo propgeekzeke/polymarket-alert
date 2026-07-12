@@ -68,6 +68,7 @@ consensus_alerted = set()  # (eventSlug, outcome) already alerted
 alert_progress = {}      # (wallet, eventSlug, outcome, side) -> USDC accumulated since last alert
 clv_log = []             # alerted BUYs pending/graded vs closing line
 clv_baseline = {}        # wallet -> historical CLV stats (computed at startup, EV-style %)
+alerted_positions = set()  # (wallet, eventSlug, outcome, side) already pinged - prevents double pings
 
 _thread = None
 _thread_lock = threading.Lock()
@@ -530,6 +531,7 @@ def save_state():
                 "consensus_alerted": ["|".join(k) for k in consensus_alerted],
                 "clv_log": clv_log[-2000:],
                 "clv_baseline": clv_baseline,
+                "alerted_positions": ["|".join(k) for k in alerted_positions],
             }, fh)
     except Exception:
         pass
@@ -547,6 +549,10 @@ def load_state():
                 consensus_alerted.add((parts[0], parts[1]))
         clv_log = d.get("clv_log", [])
         clv_baseline.update(d.get("clv_baseline", {}))
+        for k in d.get("alerted_positions", []):
+            parts = k.split("|")
+            if len(parts) == 4:
+                alerted_positions.add(tuple(parts))
         print(f"State loaded: {len(watermarks)} watermarks, {len(clv_log)} CLV entries", flush=True)
     except Exception:
         pass
@@ -718,10 +724,13 @@ def handle_trade(trade, label, wallet):
             send_consensus_alert(event_slug, outcome, title, book, trade)
 
     pkey = (wallet, event_slug, outcome, side)
+    if pkey in alerted_positions:   # already pinged this position -> suppress multi-fill/add double pings
+        return
     alert_progress[pkey] = alert_progress.get(pkey, 0) + fill_size
     if alert_progress[pkey] < WALLET_MIN_SIZE.get(wallet, MIN_SIZE):
         return
     accumulated = alert_progress.pop(pkey)
+    alerted_positions.add(pkey)
     send_discord_alert(trade, label, wallet, gs, accumulated)
 
 # --- Monitor loop ------------------------------------------------------------
@@ -774,6 +783,10 @@ def monitor_loop():
                     g = game_starts.get(k[1])
                     if g and time.time() > g:
                         del alert_progress[k]
+                for k in list(alerted_positions):
+                    g = game_starts.get(k[1])
+                    if g and time.time() > g:
+                        alerted_positions.discard(k)
         except Exception as e:
             print(f"Monitor loop error: {e}", flush=True)
             time.sleep(5)
