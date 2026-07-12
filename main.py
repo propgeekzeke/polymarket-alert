@@ -813,6 +813,254 @@ def ensure_monitor():
 ensure_monitor()
 
 
+
+BOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sharp Wallet Tracker</title>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--line:#21262d;--fg:#e6edf3;--mut:#8b949e;--grn:#3fb950;--red:#f85149;--acc:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  h1{font-size:18px;margin:0}
+  .sub{color:var(--mut);font-size:12px}
+  .wrap{max-width:1100px;margin:0 auto;padding:16px 20px 60px}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em;cursor:default}
+  .pos{color:var(--grn)}.neg{color:var(--red)}.mut{color:var(--mut)}
+  tr.w{cursor:pointer}
+  tr.w:hover{background:#1b222b}
+  .name{font-weight:600}
+  .chip{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#21262d;color:var(--mut)}
+  .bets{background:#0b0f14}
+  .bets td{padding:0}
+  .bets .inner{padding:6px 10px 12px 24px}
+  .bt{width:100%;border-collapse:collapse}
+  .bt th,.bt td{border-bottom:1px solid #1c2129;padding:6px 8px;font-size:12.5px}
+  .empty{color:var(--mut);padding:8px 24px;font-size:12.5px}
+  a{color:var(--acc);text-decoration:none}
+  .rk{color:var(--mut);width:22px;display:inline-block}
+  #err{color:var(--red);padding:20px}
+  .reload{margin-left:auto;background:#21262d;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px}
+  .reload:hover{border-color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Sharp Wallet Tracker</h1>
+  <span class="sub" id="meta">loading…</span>
+  <button class="reload" onclick="load()">Reload</button>
+</header>
+<div class="wrap">
+  <div id="err"></div>
+  <table id="tbl">
+    <thead><tr>
+      <th>Wallet</th><th>Lifetime P&amp;L</th><th>30d</th><th>ROI</th>
+      <th>CLV %</th><th>Beat close</th><th>Active bets</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+<script>
+// If hosting this file yourself (not served by the bot), set DATA_URL to your bot URL, e.g.
+// const DATA_URL = "https://your-bot.onrender.com/dashboard.json";
+const DATA_URL = (location.pathname.endsWith("/board") ? "/dashboard.json" : "/dashboard.json");
+function money(n){ if(n===null||n===undefined) return '<span class="mut">—</span>';
+  const s=n<0?'neg':'pos'; return '<span class="'+s+'">'+(n<0?'-':'')+'
+    ensure_monitor()
+    return jsonify({
+        "status":          "running",
+        "thread_alive":    _thread.is_alive() if _thread else False,
+        "pid":             os.getpid(),
+        "pinnacle":        bool(ODDS_API_KEY),
+        "profiles_loaded": len(wallet_profiles),
+        "clv_logged":      len(clv_log),
+        "clv_graded":      sum(1 for e in clv_log if e.get("clv") is not None),
+    })
+
+
+@app.route("/clv")
+def clv():
+    ensure_monitor()
+    stats = clv_stats()
+    return jsonify({
+        "wallets": {s["label"]: {k: v for k, v in s.items() if k != "label"}
+                    for s in stats.values()},
+        "pending": sum(1 for e in clv_log if e.get("clv") is None and not e.get("failed")),
+        "note": "avg_clv_pp > 0 and beat_close_pct > 50 = wallet still sharp; consider demoting anyone negative over n>=30",
+    })
++Math.abs(n).toLocaleString()+'</span>'; }
+function pct(n,suf){ if(n===null||n===undefined) return '<span class="mut">—</span>';
+  const s=n<0?'neg':(n>0?'pos':'mut'); return '<span class="'+s+'">'+(n>0?'+':'')+n+(suf||'')+'</span>'; }
+function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function fmtDate(d){ if(!d) return ''; try{ return new Date(d).toLocaleDateString(undefined,{month:'short',day:'numeric'}); }catch(e){ return ''; } }
+
+async function load(){
+  document.getElementById('err').textContent='';
+  document.getElementById('meta').textContent='loading…';
+  let data;
+  try{ const r=await fetch(DATA_URL,{cache:'no-store'}); data=await r.json(); }
+  catch(e){ document.getElementById('err').textContent='Could not reach '+DATA_URL+' — is the bot running? '+e; document.getElementById('meta').textContent=''; return; }
+  const rows=document.getElementById('rows'); rows.innerHTML='';
+  data.wallets.forEach((w,i)=>{
+    const tr=document.createElement('tr'); tr.className='w';
+    const n=(w.active||[]).length;
+    tr.innerHTML=
+      '<td><span class="rk">'+(i+1)+'</span><span class="name">'+esc(w.label)+'</span></td>'+
+      '<td>'+money(w.lifetime_pnl)+'</td>'+
+      '<td>'+money(w.pnl_30d)+'</td>'+
+      '<td>'+pct(w.roi_pct,'%')+'</td>'+
+      '<td>'+pct(w.clv_pct,'%')+' <span class="mut">'+(w.clv_n?('n='+w.clv_n):'')+'</span></td>'+
+      '<td>'+(w.beat_pct!=null?w.beat_pct+'%':'<span class="mut">—</span>')+'</td>'+
+      '<td><span class="chip">'+n+' open</span></td>';
+    const det=document.createElement('tr'); det.className='bets'; det.style.display='none';
+    let inner='<div class="inner">';
+    if(n){
+      inner+='<table class="bt"><thead><tr><th style="text-align:left">Market</th><th style="text-align:left">Side</th><th>Entry</th><th>Now</th><th>Value</th><th>P&amp;L</th><th>Ends</th></tr></thead><tbody>';
+      w.active.forEach(b=>{
+        inner+='<tr><td style="text-align:left"><a href="https://polymarket.com/event/'+esc(b.slug)+'" target="_blank">'+esc(b.title)+'</a></td>'+
+          '<td style="text-align:left">'+esc(b.outcome)+'</td>'+
+          '<td>'+b.avg+'c</td><td>'+b.cur+'c</td>'+
+          '<td>
+    ensure_monitor()
+    return jsonify({
+        "status":          "running",
+        "thread_alive":    _thread.is_alive() if _thread else False,
+        "pid":             os.getpid(),
+        "pinnacle":        bool(ODDS_API_KEY),
+        "profiles_loaded": len(wallet_profiles),
+        "clv_logged":      len(clv_log),
+        "clv_graded":      sum(1 for e in clv_log if e.get("clv") is not None),
+    })
+
+
+@app.route("/clv")
+def clv():
+    ensure_monitor()
+    stats = clv_stats()
+    return jsonify({
+        "wallets": {s["label"]: {k: v for k, v in s.items() if k != "label"}
+                    for s in stats.values()},
+        "pending": sum(1 for e in clv_log if e.get("clv") is None and not e.get("failed")),
+        "note": "avg_clv_pp > 0 and beat_close_pct > 50 = wallet still sharp; consider demoting anyone negative over n>=30",
+    })
++ (b.value||0).toLocaleString()+'</td>'+
+          '<td>'+money(b.pnl)+' '+pct(b.pnl_pct,'%')+'</td>'+
+          '<td class="mut">'+fmtDate(b.end)+'</td></tr>';
+      });
+      inner+='</tbody></table>';
+    } else { inner+='<div class="empty">No active (non-futures) positions.</div>'; }
+    inner+='</div>';
+    det.innerHTML='<td colspan="7">'+inner+'</td>';
+    tr.onclick=()=>{ det.style.display = det.style.display==='none'?'':'none'; };
+    rows.appendChild(tr); rows.appendChild(det);
+  });
+  const dt=new Date(data.updated);
+  document.getElementById('meta').textContent=data.wallets.length+' wallets · updated '+dt.toLocaleString()+' · click a row for active bets';
+}
+load();
+</script>
+</body>
+</html>
+"""
+
+# --- Dashboard (JSON API + served HTML page) ---------------------------------
+
+_official_pnl_cache = {}   # wallet -> (ts, {all, d30})
+_dash_cache = {"ts": 0, "data": None}
+
+def get_official_pnl(wallet):
+    now = time.time()
+    c = _official_pnl_cache.get(wallet)
+    if c and now - c[0] < 3600:
+        return c[1]
+    out = {}
+    try:
+        d = requests.get("https://user-pnl-api.polymarket.com/user-pnl",
+                         params={"user_address": wallet, "interval": "all", "fidelity": "1d"},
+                         timeout=10).json()
+        if isinstance(d, list) and d:
+            out = {"all": round(d[-1]["p"]),
+                   "d30": round(d[-1]["p"] - d[-31]["p"]) if len(d) > 31 else round(d[-1]["p"])}
+    except Exception:
+        pass
+    _official_pnl_cache[wallet] = (now, out)
+    return out
+
+
+def get_open_positions(wallet):
+    try:
+        d = requests.get("https://data-api.polymarket.com/positions",
+                         params={"user": wallet, "sortBy": "CURRENT",
+                                 "sortDirection": "DESC", "limit": 500}, timeout=15).json()
+    except Exception:
+        return []
+    out = []
+    for p in d if isinstance(d, list) else []:
+        if p.get("redeemable") or (p.get("currentValue", 0) or 0) < 50:
+            continue
+        title = p.get("title", "")
+        slug = p.get("eventSlug", "") or p.get("slug", "")
+        if _is_futures(title, slug) or _is_prop_noise(title, slug):
+            continue
+        out.append({
+            "title": title, "outcome": p.get("outcome", ""),
+            "avg": round((p.get("avgPrice", 0) or 0) * 100, 1),
+            "cur": round((p.get("curPrice", 0) or 0) * 100, 1),
+            "value": round(p.get("currentValue", 0) or 0),
+            "pnl": round(p.get("cashPnl", 0) or 0),
+            "pnl_pct": round(p.get("percentPnl", 0) or 0, 1),
+            "end": p.get("endDate", ""), "slug": slug,
+        })
+    return out
+
+
+def build_dashboard():
+    now = time.time()
+    if _dash_cache["data"] and now - _dash_cache["ts"] < 120:
+        return _dash_cache["data"]
+    rows = []
+    for wallet, label in WALLETS.items():
+        prof = wallet_profiles.get(wallet, {})
+        clv = clv_baseline.get(wallet) or clv_stats(wallet).get(wallet) or {}
+        o = get_official_pnl(wallet)
+        rows.append({
+            "label": label, "address": wallet,
+            "lifetime_pnl": o.get("all"), "pnl_30d": o.get("d30"),
+            "roi_pct": prof.get("roi_pct"),
+            "clv_pct": clv.get("avg_clv_pp"), "beat_pct": clv.get("beat_close_pct"),
+            "clv_n": clv.get("n"),
+            "active": get_open_positions(wallet),
+        })
+    rows.sort(key=lambda r: (r["clv_pct"] if r["clv_pct"] is not None else -99), reverse=True)
+    data = {"updated": datetime.now(timezone.utc).isoformat(), "wallets": rows}
+    _dash_cache["ts"] = now
+    _dash_cache["data"] = data
+    return data
+
+
+@app.after_request
+def _cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
+@app.route("/dashboard.json")
+def dashboard_json():
+    ensure_monitor()
+    return jsonify(build_dashboard())
+
+
+@app.route("/board")
+def board():
+    return BOARD_HTML
+
+
 @app.route("/")
 @app.route("/health")
 def health():
