@@ -37,6 +37,7 @@ CONSENSUS_MIN = 1000     # any tracked-wallet pre-game BUY >= this counts toward
 TAIL_OK_PP = 1.0         # current price within this of entry -> tailable
 TAIL_MEH_PP = 2.5        # within this -> caution; beyond -> line gone
 STATE_FILE = "/tmp/polyalert_state.json"
+MAX_TRADE_AGE = 12 * 3600  # never alert on trades older than this (prevents re-pinging stale bets on restart)
 
 WALLET_MIN_SIZE = {
     # Tier 1 scouts: thresholds ~= their avg PRE-GAME position size
@@ -696,6 +697,11 @@ def handle_trade(trade, label, wallet):
 
     fill_size = trade.get("usdcSize", 0)
     ts        = trade.get("timestamp", 0)
+
+    # Recency guard: never alert on stale trades (fixes re-pinging days-old bets after a restart,
+    # esp. spread/derivative markets where game-start time is unknown so the pre-game filter is bypassed)
+    if ts and ts < time.time() - MAX_TRADE_AGE:
+        return
 
     gs = get_game_start(event_slug)
     if gs and ts >= gs:
