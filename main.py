@@ -1,5 +1,5 @@
 """PolyAlert v2 - pre-game sharp tailing: tailability check, consensus, CLV scoreboard."""
-import os, time, threading, requests, statistics, json
+import os, time, threading, requests, statistics, json, fcntl
 from datetime import datetime, timezone
 from flask import Flask, jsonify
 
@@ -73,6 +73,7 @@ alerted_positions = set()  # (wallet, eventSlug, outcome, side) already pinged -
 _thread = None
 _thread_lock = threading.Lock()
 _seeded = False
+_monitor_owner = None    # None=undecided, True=this process runs the monitor, False=another does
 
 # Slug keyword -> The Odds API sport key
 SPORT_MAP = [
@@ -801,8 +802,22 @@ def monitor_loop():
 
 def ensure_monitor():
     """Load state, seed seen hashes + wallet profiles, start polling thread."""
-    global _thread, _seeded
+    global _thread, _seeded, _monitor_owner
     with _thread_lock:
+        if _monitor_owner is None:
+            # Singleton monitor: only the process that grabs this file lock polls + alerts,
+            # so duplicate gunicorn workers can't each fire their own identical alerts.
+            try:
+                fh = open("/tmp/polyalert_monitor.lock", "w")
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                globals()["_monitor_lock_fh"] = fh   # keep ref so the lock is held for process life
+                _monitor_owner = True
+                print(f"Monitor lock acquired by pid={os.getpid()}", flush=True)
+            except (OSError, IOError):
+                _monitor_owner = False
+                print(f"Monitor lock held elsewhere; pid={os.getpid()} serves HTTP only", flush=True)
+        if not _monitor_owner:
+            return
         if not _seeded:
             load_state()
             now = time.time()
