@@ -26,6 +26,8 @@ WALLETS = {
     "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960": "#SportMaster",    # CLV +0.74% (tail small bets), $1.44M, MLB/Soc
     "0xf1528f12e645462c344799b62b1b421a6a4c64aa": "#PhoneSculptor",  # CLV +0.58%, $772k, MLB/Soc, avg $18.6k
     "0x204f72f35326db932158cba6adff0b9a1da95e14": "#SwissTony",      # $15.86M/+$6.4M-30d, CLV in-line - validate live
+    # Added 2026-07-15 (found via England-Argentina advance-market scan)
+    "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": "#Hot2Trot",       # CLV +4.62%, beats close 82%, pure soccer, $2.42M/24d
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -54,6 +56,7 @@ WALLET_MIN_SIZE = {
     "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960": 2000,   # #SportMaster (tail small bets; avg $2.1k)
     "0xf1528f12e645462c344799b62b1b421a6a4c64aa": 8000,   # #PhoneSculptor (avg $18.6k)
     "0x204f72f35326db932158cba6adff0b9a1da95e14": 10000,  # #SwissTony (whale, avg $33.9k)
+    "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": 25000,  # #Hot2Trot (soccer whale, avg $81k)
 }
 
 # --- Runtime state -----------------------------------------------------------
