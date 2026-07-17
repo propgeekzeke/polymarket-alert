@@ -53,6 +53,7 @@ consensus_alerted = set()  # (eventSlug, outcome) already alerted
 alert_progress = {}      # (wallet, eventSlug, outcome, side) -> USDC accumulated since last alert
 clv_log = []             # alerted BUYs pending/graded vs closing line
 clv_baseline = {}        # wallet -> historical CLV stats (computed at startup, EV-style %)
+wallet_cards = {}        # wallet -> {avg_bet, all_pnl, all_roi, soc_pnl, soc_roi} for alerts
 alerted_positions = set()  # (wallet, eventSlug, outcome, side) already pinged - prevents double pings
 
 _thread = None
@@ -507,6 +508,63 @@ def compute_historical_clv(wallet, max_events=40):
             "beat_close_pct": round(sum(1 for c in clvs if c > 0) / len(clvs) * 100),
             "n": len(clvs)}
 
+
+def compute_wallet_card(wallet):
+    """Startup stats for alerts: avg bet, all-time + soccer P&L/ROI (mark-to-market)."""
+    SOC = ("fifwc", "epl-", "lal-", "ucl-", "sea-", "bun-", "li1-", "mls-", "uel-",
+           "world-cup", "copa", "champions")
+    raw, offset = [], 0
+    while offset < 6000:
+        try:
+            b = requests.get("https://data-api.polymarket.com/activity",
+                             params={"user": wallet, "limit": 500, "offset": offset}, timeout=15).json()
+        except Exception:
+            break
+        if not isinstance(b, list) or not b:
+            break
+        raw.extend(b)
+        if len(b) < 500:
+            break
+        offset += 500
+    cost = soc_cost = soc_proc = 0.0
+    stakes = {}
+    for t in raw:
+        u = t.get("usdcSize", 0) or 0
+        if u <= 0:
+            continue
+        slug = (t.get("eventSlug") or "").lower()
+        typ, side = t.get("type", ""), t.get("side", "")
+        soc = any(k in slug for k in SOC)
+        if typ == "TRADE" and side == "BUY":
+            cost += u
+            if soc:
+                soc_cost += u
+            if u >= 1000 and (soc or slug.startswith("mlb-")):
+                k = (slug, t.get("asset", "")); stakes[k] = stakes.get(k, 0) + u
+        elif typ == "REDEEM" or (typ == "TRADE" and side == "SELL"):
+            if soc:
+                soc_proc += u
+    openval = 0.0
+    try:
+        p = requests.get("https://data-api.polymarket.com/positions",
+                         params={"user": wallet, "limit": 500}, timeout=15).json()
+        for x in p if isinstance(p, list) else []:
+            s = (x.get("eventSlug", "") or x.get("slug", "")).lower()
+            if any(k in s for k in SOC):
+                openval += x.get("currentValue", 0) or 0
+    except Exception:
+        pass
+    o = get_official_pnl(wallet)
+    stk = [v for v in stakes.values() if v > 0]
+    soc_pnl = round(soc_proc - soc_cost + openval)
+    return {
+        "avg_bet": round(statistics.mean(stk)) if stk else 0,
+        "all_pnl": o.get("all"),
+        "all_roi": round(o["all"] / cost * 100, 1) if (o.get("all") is not None and cost > 0) else None,
+        "soc_pnl": soc_pnl,
+        "soc_roi": round(soc_pnl / soc_cost * 100, 1) if soc_cost > 0 else None,
+    }
+
 # --- State persistence -------------------------------------------------------
 
 def save_state():
@@ -517,6 +575,7 @@ def save_state():
                 "consensus_alerted": ["|".join(k) for k in consensus_alerted],
                 "clv_log": clv_log[-2000:],
                 "clv_baseline": clv_baseline,
+                "wallet_cards": wallet_cards,
                 "alerted_positions": ["|".join(k) for k in alerted_positions],
             }, fh)
     except Exception:
@@ -535,6 +594,7 @@ def load_state():
                 consensus_alerted.add((parts[0], parts[1]))
         clv_log = d.get("clv_log", [])
         clv_baseline.update(d.get("clv_baseline", {}))
+        wallet_cards.update(d.get("wallet_cards", {}))
         for k in d.get("alerted_positions", []):
             parts = k.split("|")
             if len(parts) == 4:
@@ -628,26 +688,22 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
         )
         lines.append(f"_{pin['method']} - {pin['home']} vs {pin['away']}_")
 
-    off_pnl = get_official_pnl(wallet)
-    if off_pnl.get("all") is not None:
-        allp = off_pnl["all"]
-        d30  = off_pnl.get("d30", 0)
-        arrow = "▲" if allp >= 0 else "▼"
-        d30s  = f"{'+' if d30 >= 0 else '-'}${abs(d30):,} 30d"
-        cats  = ", ".join(profile.get("top_cats", [])) if profile else ""
-        line = f"\U0001f4cb **{label}**  ·  {arrow} **${abs(allp):,}** lifetime  ·  {d30s}"
-        if cats:
-            line += f"  ·  {cats}"
-        lines.append(line)
-    elif profile and profile.get("total_pnl") is not None:
-        pnl = profile.get("total_pnl"); roi = profile.get("roi_pct")
-        arrow = "▲" if pnl >= 0 else "▼"
-        sign = "+" if pnl >= 0 else ""
-        cats = ", ".join(profile.get("top_cats", [])) or "-"
-        lines.append(f"\U0001f4cb **{label}**  ·  {arrow} **${abs(pnl):,}** ({sign}{roi}% ROI)  ·  {cats}")
+    card = wallet_cards.get(wallet, {})
     if my_clv:
         lines.append(f"\U0001f4c8 **CLV {my_clv['avg_clv_pp']:+.2f}%** avg  ·  "
                      f"beats close **{my_clv['beat_close_pct']}%**  ·  n={my_clv['n']}")
+    if card:
+        stat = []
+        allp = card.get("all_pnl"); allr = card.get("all_roi")
+        socp = card.get("soc_pnl"); socr = card.get("soc_roi")
+        if allp is not None:
+            a = "▲" if allp >= 0 else "▼"
+            stat.append(f"All-time {a} **${abs(allp):,}**" + (f" ({allr:+g}% ROI)" if allr is not None else ""))
+        if socp is not None:
+            a = "▲" if socp >= 0 else "▼"
+            stat.append(f"Soccer {a} **${abs(socp):,}**" + (f" ({socr:+g}% ROI)" if socr is not None else ""))
+        if stat:
+            lines.append("\U0001f4b0 " + "  ·  ".join(stat))
 
     lines.append(f"<https://polymarket.com/@{wallet}>")
     _post_discord("\n".join(lines))
@@ -730,16 +786,19 @@ def handle_trade(trade, label, wallet):
 def monitor_loop():
     print(f"Monitor thread running in pid={os.getpid()}", flush=True)
     for wallet, label in WALLETS.items():
-        if wallet in clv_baseline:
-            continue
         try:
-            base = compute_historical_clv(wallet)
-            if base:
-                clv_baseline[wallet] = base
-                print(f"CLV baseline {label}: {base['avg_clv_pp']:+.2f}% avg, "
-                      f"beats {base['beat_close_pct']}% (n={base['n']})", flush=True)
+            if wallet not in clv_baseline:
+                base = compute_historical_clv(wallet)
+                if base:
+                    clv_baseline[wallet] = base
+                    print(f"CLV baseline {label}: {base['avg_clv_pp']:+.2f}% avg, "
+                          f"beats {base['beat_close_pct']}% (n={base['n']})", flush=True)
+            if wallet not in wallet_cards:
+                wallet_cards[wallet] = compute_wallet_card(wallet)
+                c = wallet_cards[wallet]
+                print(f"Card {label}: avg ${c['avg_bet']:,}, all ${c['all_pnl']}, soc ${c['soc_pnl']}", flush=True)
         except Exception as e:
-            print(f"CLV baseline error {label}: {e}", flush=True)
+            print(f"Card/CLV error {label}: {e}", flush=True)
     save_state()
     cycles = 0
     while True:
