@@ -6,28 +6,16 @@ from flask import Flask, jsonify
 app = Flask(__name__)
 
 WALLETS = {
-    "0x26437896ed9dfeb2f69765edcafe8fdceaab39ae": "#Latina",
-    "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",
-    "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BTB",
-    "0xfea31bc088000ff909be1dfd8d0e3f2c7ef2d227": "#0XFE",
-    # Tier 1 from wallet scout 2026-07-09 (CLV-positive, profitable, $1k+ avg stakes)
-    "0xa804390f80019699ab34a282c0df7528fba82a75": "#RiverSkew",     # CLV +0.76pp, 67% beat close, MLB+Soc
-    "0x23c8a4c266d10ba5846837eac391fea89ed6f293": "#Netrol",        # CLV +0.58pp, 72% beat close, 6mo, Soc
-    "0xbca08c1bc204a34f2fddbe47b438b9bd42ac9705": "#1WinStreak",    # $992k/75d, wtd CLV +0.81pp, MLB
-    "0x2a69660046d7acc4ab204d7cc5ba78b0776cd2f7": "#UpTheBlues",    # $524k, CLV +0.44pp, high volume, Soc
-    "0x448861155279dbf833d041b963e3ac854599e319": "#Flipadelphia",  # $561k/590d grinder, MLB+Soc
-    # Added 2026-07-11 (friend-flagged whale; elite P&L, in-line CLV on big bets - validate live)
-    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": "#Whale2c33",     # $6.2M/277d, +0.62% CLV avg (whale bets in-line), Soc+MLB
-    # Added 2026-07-11 (corrected-P&L re-run: beat close + real realized P&L)
-    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": "#VeryLucky888",  # CLV +1.58%, 71% beat, $412k, 89%mo-up, Soc/UFC/MLB
-    "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255": "#Airpods123",     # CLV +0.98%, 71% beat, $1.02M whale, Soc/NBA
-    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": "#Sharp2a2C",      # CLV +0.93%, 71% beat, $4.18M, Soc/NBA/NHL
-    "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": "#Gardiner",       # CLV +0.71%, 59% beat, $185k, Soc/Tennis/MLB
-    "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960": "#SportMaster",    # CLV +0.74% (tail small bets), $1.44M, MLB/Soc
-    "0xf1528f12e645462c344799b62b1b421a6a4c64aa": "#PhoneSculptor",  # CLV +0.58%, $772k, MLB/Soc, avg $18.6k
-    "0x204f72f35326db932158cba6adff0b9a1da95e14": "#SwissTony",      # $15.86M/+$6.4M-30d, CLV in-line - validate live
-    # Added 2026-07-15 (found via England-Argentina advance-market scan)
-    "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": "#Hot2Trot",       # CLV +4.62%, beats close 82%, pure soccer, $2.42M/24d
+    # Core: consistent CLV-beaters (curated 2026-07-15)
+    "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255": "#Airpods123",   # 76% beat, +1.24% CLV (n=83), $1.02M
+    "0xa804390f80019699ab34a282c0df7528fba82a75": "#RiverSkew",    # 65% beat, +2.16% CLV (n=154), $389k
+    "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": "#Hot2Trot",     # 67% beat, +2.67% CLV (n=33), soccer whale $2.11M
+    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": "#Sharp2a2C",    # 70% beat, +0.88% CLV (n=20), $4.31M
+    "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",         # 67% beat, +0.91% CLV (n=15), big bettor
+    "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": "#Gardiner",     # 60% beat, +0.76% CLV (n=166), $207k
+    # Whales: don't beat CLV (likely bet late to hide it) but hugely profitable - tail on selection
+    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": "#Whale2c33",    # $6.52M all-time, in-line CLV
+    "0x204f72f35326db932158cba6adff0b9a1da95e14": "#SwissTony",    # $19.34M all-time, in-line CLV
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -42,21 +30,15 @@ STATE_FILE = "/tmp/polyalert_state.json"
 MAX_TRADE_AGE = 12 * 3600  # never alert on trades older than this (prevents re-pinging stale bets on restart)
 
 WALLET_MIN_SIZE = {
-    # Tier 1 scouts: thresholds ~= their avg PRE-GAME position size
-    "0xa804390f80019699ab34a282c0df7528fba82a75": 3000,   # #RiverSkew (avg $4.7k)
-    "0x23c8a4c266d10ba5846837eac391fea89ed6f293": 4000,   # #Netrol (avg $6.4k)
-    "0xbca08c1bc204a34f2fddbe47b438b9bd42ac9705": 2000,   # #1WinStreak (avg $2.8k)
-    "0x2a69660046d7acc4ab204d7cc5ba78b0776cd2f7": 2500,   # #UpTheBlues (avg $2.4k pre-game; live noise now filtered)
-    "0x448861155279dbf833d041b963e3ac854599e319": 5000,   # #Flipadelphia (avg $9.2k)
-    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 5000,   # #Whale2c33 (huge sizing; $5k gate)
-    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": 2500,   # #VeryLucky888 (avg $2.7k)
-    "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255": 10000,  # #Airpods123 (whale, avg $53.8k)
-    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": 10000,  # #Sharp2a2C (whale, avg $37k)
-    "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": 3000,   # #Gardiner (avg $3.2k)
-    "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960": 2000,   # #SportMaster (tail small bets; avg $2.1k)
-    "0xf1528f12e645462c344799b62b1b421a6a4c64aa": 8000,   # #PhoneSculptor (avg $18.6k)
-    "0x204f72f35326db932158cba6adff0b9a1da95e14": 10000,  # #SwissTony (whale, avg $33.9k)
-    "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": 25000,  # #Hot2Trot (soccer whale, avg $81k)
+    # Conviction thresholds ~= 80% of each wallet's average bet - only real plays ping
+    "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255": 65000,  # #Airpods123 (avg $84k)
+    "0xa804390f80019699ab34a282c0df7528fba82a75": 5000,   # #RiverSkew (avg $6.4k)
+    "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": 85000,  # #Hot2Trot (avg $108k)
+    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": 30000,  # #Sharp2a2C (avg $38k)
+    "0x709e8dcb133555794decc598e07f2c923b8366f5": 150000, # #0X70 (avg $185k)
+    "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": 5500,   # #Gardiner (avg $7k)
+    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 75000,  # #Whale2c33 (conviction floor; skips market-making)
+    "0x204f72f35326db932158cba6adff0b9a1da95e14": 50000,  # #SwissTony (conviction floor; skips market-making)
 }
 
 # --- Runtime state -----------------------------------------------------------
