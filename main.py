@@ -13,6 +13,7 @@ WALLETS = {
     "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": "#Sharp2a2C",    # 70% beat, +0.88% CLV (n=20), $4.31M
     "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",         # 67% beat, +0.91% CLV (n=15), big bettor
     "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": "#Gardiner",     # 60% beat, +0.76% CLV (n=166), $207k
+    "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": "#Sharp076d",    # 71% beat, +1.82% CLV / +3.14% wtd (n=21), $3.76M, soccer +15.6% ROI
     # Whales: don't beat CLV (likely bet late to hide it) but hugely profitable - tail on selection
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": "#Whale2c33",    # $6.52M all-time, in-line CLV
     "0x204f72f35326db932158cba6adff0b9a1da95e14": "#SwissTony",    # $19.34M all-time, in-line CLV
@@ -37,6 +38,7 @@ WALLET_MIN_SIZE = {
     "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": 30000,  # #Sharp2a2C (avg $38k)
     "0x709e8dcb133555794decc598e07f2c923b8366f5": 150000, # #0X70 (avg $185k)
     "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": 5500,   # #Gardiner (avg $7k)
+    "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": 6500,   # #Sharp076d (avg $8.1k)
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 75000,  # #Whale2c33 (conviction floor; skips market-making)
     "0x204f72f35326db932158cba6adff0b9a1da95e14": 50000,  # #SwissTony (conviction floor; skips market-making)
 }
