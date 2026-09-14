@@ -1,5 +1,5 @@
 """PolyAlert v2 - pre-game sharp tailing: tailability check, consensus, CLV scoreboard."""
-import os, time, threading, requests, statistics, json, fcntl
+import os, re, time, threading, requests, statistics, json, fcntl
 from datetime import datetime, timezone
 from flask import Flask, jsonify
 
@@ -45,15 +45,23 @@ WALLET_MIN_SIZE = {
     "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": 6500,   # #Sharp076d (avg $8.1k)
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 75000,  # #Whale2c33 (conviction floor; skips market-making)
     "0x204f72f35326db932158cba6adff0b9a1da95e14": 50000,  # #SwissTony (conviction floor; skips market-making)
-    "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": 14000,  # #SeriouslySirius (avg $17.9k)
+    "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": 10000,  # #SeriouslySirius (elite in 5 sports; NBA/NHL/soccer avg $22-33k, NFL $144k)
     "0xb889590a2fab0c810584a660518c4c020325a430": 37000,  # #Ems123 (avg $46k)
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": 3200,   # #HomeRunHazard (avg $4k)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
 # in-play grinding with 52% beat-close pre-game (n=96) and esports is noise; never ping those.
+_TENNIS  = ("atp-", "wta-")
+_ESPORTS = ("lol-", "cs-", "cs2-", "val-", "dota-", "esports-", "r6-", "rl-")
 WALLET_BLOCK = {
-    "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": ("atp-", "wta-", "lol-", "cs-", "cs2-", "val-", "dota-", "esports-"),
+    # per-sport test 2026-09-14 (per_sport_report_2026-09-14.md): block sports with no pre-game CLV edge
+    "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": _TENNIS + _ESPORTS,            # #Sharp076d: soccer only (tennis 50% beat, 56% live)
+    "0xa804390f80019699ab34a282c0df7528fba82a75": _TENNIS + _ESPORTS,            # #RiverSkew: tennis -0.16% CLV (n=64), esports 43% beat
+    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": _TENNIS + _ESPORTS + ("nhl-",),# #Sharp2a2C: edge is CBB+soccer; NHL/esports in-line, tennis -$1.69M
+    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": ("nfl-", "cfb-"),               # #Whale2c33: NFL 29% beat / -2.59% CLV, CFB 36% beat
+    "0x5268527977f700f9bf9b6d5cd843859e4e70135d": _TENNIS + ("mlb-",),           # #HomeRunHazard: MLB grinder (52% beat, 66% live), tennis 94% live
+    "0x709e8dcb133555794decc598e07f2c923b8366f5": ("ufc-", "mlb-", "nhl-"),       # #0X70: -$515k combined, tiny samples
 }
 
 # --- Runtime state -----------------------------------------------------------
@@ -69,6 +77,7 @@ alert_progress = {}      # (wallet, eventSlug, outcome, side) -> USDC accumulate
 clv_log = []             # alerted BUYs pending/graded vs closing line
 clv_baseline = {}        # wallet -> historical CLV stats (computed at startup, EV-style %)
 wallet_cards = {}        # wallet -> {avg_bet, all_pnl, all_roi, soc_pnl, soc_roi} for alerts
+sport_stats  = {}        # wallet -> {sport: {positions, cost, pnl, roi, n, avg_clv_pp, beat_close_pct}} (background-loaded)
 alerted_positions = set()  # (wallet, eventSlug, outcome, side) already pinged - prevents double pings
 
 _thread = None
@@ -525,6 +534,99 @@ def compute_historical_clv(wallet, max_events=40):
             "n": len(clvs)}
 
 
+def _sport_of(slug):
+    """Coarse sport bucket from an event slug (used for per-sport CLV / P&L on alerts)."""
+    s = (slug or "").lower()
+    if s.startswith("mlb-"):                                  return "MLB"
+    if s.startswith(("atp-", "wta-")):                        return "Tennis"
+    if s.startswith("cfb-"):                                  return "CFB"
+    if s.startswith("nfl-"):                                  return "NFL"
+    if s.startswith(("nba-", "wnba-")):                       return "NBA"
+    if s.startswith(("cbb-", "ncaab-")):                      return "CBB"
+    if s.startswith("nhl-"):                                  return "NHL"
+    if s.startswith(("ufc-", "mma-", "bkfc-", "pfl-")) or "noche" in s:  return "MMA"
+    if s.startswith(("lol-", "cs-", "cs2-", "val-", "dota-", "r6-", "rl-")) or "esport" in s:  return "Esports"
+    if re.search(r"-\d{4}-\d{2}-\d{2}", s) or "-vs-" in s or "win-on" in s:  return "Soccer"
+    return "Other"
+
+
+def compute_sport_stats(wallet, per_sport=40, max_positions=8000):
+    """Per-sport realized P&L/ROI over closed positions + pre-game CLV on that sport's biggest $1k+ bets."""
+    closed, seen, offset = [], set(), 0
+    while offset < max_positions:
+        try:
+            b = requests.get("https://data-api.polymarket.com/closed-positions",
+                             params={"user": wallet, "limit": 50, "offset": offset,
+                                     "sortBy": "TIMESTAMP", "sortDirection": "DESC"}, timeout=15).json()
+        except Exception:
+            break
+        if not isinstance(b, list) or not b:
+            break
+        new = 0
+        for p in b:
+            k = (p.get("asset"), p.get("conditionId"))
+            if k not in seen:
+                seen.add(k); closed.append(p); new += 1
+        if not new or len(b) < 50:
+            break
+        offset += 50
+    by = {}
+    for p in closed:
+        sp = _sport_of(p.get("eventSlug") or p.get("slug"))
+        cost = (p.get("totalBought") or 0) * (p.get("avgPrice") or 0)
+        d = by.setdefault(sp, {"cost": 0.0, "pnl": 0.0, "n": 0, "big": []})
+        d["cost"] += cost; d["pnl"] += (p.get("realizedPnl") or 0); d["n"] += 1
+        if cost >= 1000:
+            d["big"].append((cost, p))
+    out = {}
+    for sp, d in by.items():
+        if sp == "Other":
+            continue
+        clvs = []
+        for cost, p in sorted(d["big"], key=lambda x: -x[0])[:per_sport]:
+            slug = (p.get("eventSlug") or "").lower()
+            gs = get_game_start(slug)
+            if not gs:
+                continue
+            try:
+                tr = requests.get("https://data-api.polymarket.com/trades",
+                                  params={"user": wallet, "market": p.get("conditionId"), "limit": 300},
+                                  timeout=15).json()
+            except Exception:
+                continue
+            if not isinstance(tr, list):
+                continue
+            pre = [t for t in tr if isinstance(t, dict) and t.get("side") == "BUY"
+                   and t.get("asset") == p.get("asset") and (t.get("timestamp") or 0) < gs]
+            stake = sum((t.get("size") or 0) * (t.get("price") or 0) for t in pre)
+            if stake < 1000:
+                continue
+            vwap = sum((t.get("size") or 0) * (t.get("price") or 0) * (t.get("price") or 0) for t in pre) / stake
+            if vwap <= 0.02 or vwap >= 0.98:
+                continue
+            close = get_closing_price(p.get("asset"), gs)
+            if close is None or close <= 0.001 or close >= 0.999:
+                continue
+            clvs.append((close / vwap - 1) * 100)
+        out[sp] = {"positions": d["n"], "cost": round(d["cost"]), "pnl": round(d["pnl"]),
+                   "roi": round(d["pnl"] / d["cost"] * 100, 1) if d["cost"] > 0 else None,
+                   "n": len(clvs),
+                   "avg_clv_pp": round(sum(clvs) / len(clvs), 2) if clvs else None,
+                   "beat_close_pct": round(sum(1 for c in clvs if c > 0) / len(clvs) * 100) if clvs else None}
+    return out
+
+
+def _load_sport_stats():
+    """Background: per-sport stats are slow (closed-positions paging) so they fill in after the monitor starts."""
+    for wallet, label in WALLETS.items():
+        try:
+            sport_stats[wallet] = compute_sport_stats(wallet)
+            summ = ", ".join(f"{k}: {v['beat_close_pct']}%/n{v['n']}" for k, v in sport_stats[wallet].items() if v.get("n"))
+            print(f"Sport stats {label}: {summ}", flush=True)
+        except Exception as e:
+            print(f"Sport stats error {label}: {e}", flush=True)
+
+
 def compute_wallet_card(wallet):
     """Startup stats for alerts: avg bet, all-time + soccer P&L/ROI (mark-to-market)."""
     SOC = ("fifwc", "epl-", "lal-", "ucl-", "sea-", "bun-", "li1-", "mls-", "uel-",
@@ -704,22 +806,30 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
         )
         lines.append(f"_{pin['method']} - {pin['home']} vs {pin['away']}_")
 
-    card = wallet_cards.get(wallet, {})
-    if my_clv:
-        lines.append(f"\U0001f4c8 **CLV {my_clv['avg_clv_pp']:+.2f}%** avg  ·  "
+    card  = wallet_cards.get(wallet, {})
+    sport = _sport_of(event_slug)
+    ss    = (sport_stats.get(wallet) or {}).get(sport) or {}
+    if ss.get("n"):
+        lines.append(f"\U0001f4c8 **{sport} CLV {ss['avg_clv_pp']:+.2f}%** avg  ·  "
+                     f"beats close **{ss['beat_close_pct']}%**  ·  n={ss['n']}")
+    elif my_clv:
+        lines.append(f"\U0001f4c8 **CLV {my_clv['avg_clv_pp']:+.2f}%** avg (all sports)  ·  "
                      f"beats close **{my_clv['beat_close_pct']}%**  ·  n={my_clv['n']}")
-    if card:
-        stat = []
-        allp = card.get("all_pnl"); allr = card.get("all_roi")
-        socp = card.get("soc_pnl"); socr = card.get("soc_roi")
-        if allp is not None:
-            a = "▲" if allp >= 0 else "▼"
-            stat.append(f"All-time {a} **${abs(allp):,}**" + (f" ({allr:+g}% ROI)" if allr is not None else ""))
-        if socp is not None:
-            a = "▲" if socp >= 0 else "▼"
-            stat.append(f"Soccer {a} **${abs(socp):,}**" + (f" ({socr:+g}% ROI)" if socr is not None else ""))
-        if stat:
-            lines.append("\U0001f4b0 " + "  ·  ".join(stat))
+    stat = []
+    allp = card.get("all_pnl"); allr = card.get("all_roi")
+    if allp is not None:
+        a = "▲" if allp >= 0 else "▼"
+        stat.append(f"All-time {a} **${abs(allp):,}**" + (f" ({allr:+g}% ROI)" if allr is not None else ""))
+    if ss.get("pnl") is not None:
+        a = "▲" if ss["pnl"] >= 0 else "▼"
+        stat.append(f"{sport} {a} **${abs(ss['pnl']):,}**"
+                    + (f" ({ss['roi']:+g}% ROI, {ss['positions']} bets)" if ss.get("roi") is not None else ""))
+    elif sport == "Soccer" and card.get("soc_pnl") is not None:
+        socp = card["soc_pnl"]; socr = card.get("soc_roi")
+        a = "▲" if socp >= 0 else "▼"
+        stat.append(f"Soccer {a} **${abs(socp):,}**" + (f" ({socr:+g}% ROI)" if socr is not None else ""))
+    if stat:
+        lines.append("\U0001f4b0 " + "  ·  ".join(stat))
 
     lines.append(f"<https://polymarket.com/@{wallet}>")
     _post_discord("\n".join(lines))
@@ -818,6 +928,7 @@ def monitor_loop():
         except Exception as e:
             print(f"Card/CLV error {label}: {e}", flush=True)
     save_state()
+    threading.Thread(target=_load_sport_stats, daemon=True).start()
     cycles = 0
     while True:
         try:
@@ -1131,6 +1242,7 @@ def build_dashboard():
             "roi_pct": prof.get("roi_pct"),
             "clv_pct": clv.get("avg_clv_pp"), "beat_pct": clv.get("beat_close_pct"),
             "clv_n": clv.get("n"),
+            "sports": sport_stats.get(wallet),
             "active": get_open_positions(wallet),
         })
     rows.sort(key=lambda r: (r["clv_pct"] if r["clv_pct"] is not None else -99), reverse=True)
