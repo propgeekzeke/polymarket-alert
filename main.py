@@ -311,7 +311,8 @@ def _detect_sport_key(event_slug):
 
 
 def get_pinnacle_devig(event_slug, title, outcome, pm_price):
-    """Fetch Pinnacle odds, devig to fair probability, compare to pm_price."""
+    """Fetch Pinnacle odds, devig to fair probability, compare to pm_price.
+    Handles 1X2/h2h, spreads (line must match) and game totals (line must match)."""
     if not ODDS_API_KEY:
         return None
     sport_key = _detect_sport_key(event_slug)
@@ -319,8 +320,21 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         return None
 
     title_lower = (title or "").lower()
-    is_totals = any(x in title_lower for x in ["o/u", "over/under", " over ", " under "])
-    market_type = "totals" if is_totals else "h2h"
+    outcome_lower = (outcome or "").lower()
+    # props Pinnacle/Odds-API don't carry -> no fair value
+    if any(x in title_lower for x in ["corner", "card", "1st half", "1h ", "2nd half", "2h ", "quarter",
+                                        "touchdown", "yards", "team total", "1st inning", "first inning",
+                                        "player", "anytime", "to score"]):
+        return None
+    is_spread = title_lower.startswith("spread:")
+    is_totals = (not is_spread) and any(x in title_lower for x in ["o/u", "over/under", " over ", " under "])
+    market_type = "spreads" if is_spread else ("totals" if is_totals else "h2h")
+    line = None
+    if is_spread or is_totals:
+        m = re.search(r"\(?([+-]?\d+(?:\.\d+)?)\)?\s*$", title_lower)
+        if not m:
+            return None
+        line = abs(float(m.group(1)))
 
     try:
         r = requests.get(
@@ -329,7 +343,7 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
                 "apiKey":     ODDS_API_KEY,
                 "bookmakers": "pinnacle",
                 "markets":    market_type,
-                "regions":    "us",
+                "regions":    "eu",
                 "oddsFormat": "american",
             }, timeout=10)
         if not r.ok:
@@ -337,29 +351,38 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
             return None
         games = r.json()
         if not isinstance(games, list) or not games:
+            print(f"Pinnacle: no games for {sport_key}", flush=True)
             return None
 
-        title_words = set(title_lower.replace("-", " ").split())
+        STOP = {"will", "win", "on", "vs", "vs.", "fc", "cf", "sc", "ac", "the", "and", "spread:", "o/u", "de", "1907", "1913"}
+        title_words = set(title_lower.replace("-", " ").replace("?", "").split()) - STOP
         best_game, best_score = None, 0
         for game in games:
             home = (game.get("home_team") or "").lower().replace("-", " ")
             away = (game.get("away_team") or "").lower().replace("-", " ")
-            score = len(title_words & set((home + " " + away).split()))
+            score = len(title_words & (set((home + " " + away).split()) - STOP))
             if score > best_score:
                 best_score, best_game = score, game
         if not best_game or best_score < 1:
+            print(f"Pinnacle: no game match for '{title}' in {sport_key}", flush=True)
             return None
 
-        pinnacle = next((b for b in best_game.get("bookmakers", [])
-                         if b["key"] == "pinnacle"), None)
+        pinnacle = next((b for b in best_game.get("bookmakers", []) if b["key"] == "pinnacle"), None)
         if not pinnacle:
             return None
-        mkt = next((m for m in pinnacle.get("markets", [])
-                    if m["key"] == market_type), None)
+        mkt = next((m for m in pinnacle.get("markets", []) if m["key"] == market_type), None)
         if not mkt:
+            print(f"Pinnacle: no {market_type} market for {best_game.get('home_team')} v {best_game.get('away_team')}", flush=True)
             return None
 
         outcomes = mkt.get("outcomes", [])
+        if line is not None:
+            outcomes = [o for o in outcomes if o.get("point") is not None and abs(abs(float(o["point"])) - line) < 0.01]
+            if len(outcomes) != 2:
+                print(f"Pinnacle: line {line} not offered ({market_type}) for {best_game.get('home_team')} v {best_game.get('away_team')}", flush=True)
+                return None
+        if not outcomes:
+            return None
         is_3way = len(outcomes) == 3
 
         def am_to_prob(p):
@@ -370,26 +393,35 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         total = sum(raw_probs.values())
         fair = {k: v / total for k, v in raw_probs.items()}
 
-        outcome_lower = outcome.lower()
-        fair_prob = fair.get(outcome_lower)
-        if fair_prob is None:
-            for name, prob in fair.items():
-                if outcome_lower in name or name in outcome_lower:
-                    fair_prob = prob
-                    break
+        def team_match(name):
+            return len((set(name.replace("-", " ").split()) - STOP) & (set(outcome_lower.replace("-", " ").split()) - STOP))
 
-        if fair_prob is None and outcome_lower == "no":
+        fair_prob = fair.get(outcome_lower)
+        if fair_prob is None and outcome_lower in ("over", "under"):
+            fair_prob = fair.get(outcome_lower)
+        if fair_prob is None and outcome_lower not in ("yes", "no"):
+            # team name on a spread / ML: best word-overlap
+            best_n, best_s = None, 0
+            for name, prob in fair.items():
+                s = team_match(name)
+                if s > best_s:
+                    best_s, best_n = s, name
+            if best_n is not None:
+                fair_prob = fair[best_n]
+        if fair_prob is None and outcome_lower in ("yes", "no"):
+            # "Will X win?" -> find X among outcomes by title overlap
             best_team_prob, best_team_score = None, 0
             for name, prob in fair.items():
                 if name == "draw":
                     continue
-                score = len(title_words & set(name.replace("-", " ").split()))
+                score = len(title_words & (set(name.replace("-", " ").split()) - STOP))
                 if score > best_team_score:
                     best_team_score, best_team_prob = score, prob
             if best_team_prob is not None and best_team_score > 0:
-                fair_prob = 1.0 - best_team_prob
+                fair_prob = best_team_prob if outcome_lower == "yes" else 1.0 - best_team_prob
 
         if fair_prob is None:
+            print(f"Pinnacle: outcome '{outcome}' not matched in {list(fair)}", flush=True)
             return None
 
         gap = round((pm_price - fair_prob) * 100, 2)
@@ -402,7 +434,7 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         else:
             edge_label = f"STALE {gap:+.1f}pp above fair"
 
-        method = f"{'3way' if is_3way else '2way'}-proportional-devig(pinnacle)"
+        method = f"{'3way' if is_3way else '2way'}-proportional-devig(pinnacle {market_type}" + (f" {line:g}" if line is not None else "") + ")"
         return {
             "fair":       round(fair_prob, 4),
             "gap":        gap,
