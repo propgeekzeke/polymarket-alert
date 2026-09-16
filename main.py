@@ -22,7 +22,6 @@ WALLETS = {
     "0xb889590a2fab0c810584a660518c4c020325a430": "#Ems123",           # CFB 84% beat, +0.92% CLV (n=25), $961k, avg $46k
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": "#HomeRunHazard",    # CFB 74% beat, +2.63% CLV (n=27), $2.44M
     "0xf68a281980f8c13828e84e147e3822381d6e5b1b": "#Nooserac",         # CFB 11/11 beat close, +1.44% CLV, $717k (+$98k 30d) - TRIAL, thin n
-    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": "#Elenes",           # Soccer +51% ROI (+$526k), 84% hit pre-game n=102 but 32% beat close - TRIAL, soccer only
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -51,7 +50,6 @@ WALLET_MIN_SIZE = {
     "0xb889590a2fab0c810584a660518c4c020325a430": 37000,  # #Ems123 (avg $46k)
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": 3200,   # #HomeRunHazard (avg $4k)
     "0xf68a281980f8c13828e84e147e3822381d6e5b1b": 2800,   # #Nooserac (avg $3.5k)
-    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": 8000,   # #Elenes (pre-game avg $10.2k)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
@@ -66,7 +64,6 @@ WALLET_BLOCK = {
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": ("nfl-", "cfb-"),               # #Whale2c33: NFL 29% beat / -2.59% CLV, CFB 36% beat
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": _TENNIS + ("mlb-",),           # #HomeRunHazard: MLB grinder (52% beat, 66% live), tennis 94% live
     "0x709e8dcb133555794decc598e07f2c923b8366f5": ("ufc-", "mlb-", "nhl-"),       # #0X70: -$515k combined, tiny samples
-    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": _TENNIS + _ESPORTS + ("nhl-", "nfl-", "cfb-", "nba-", "wnba-", "cbb-", "mlb-", "ufc-"),  # #Elenes: soccer only (NHL -43% ROI)
 }
 
 # --- Runtime state -----------------------------------------------------------
@@ -743,7 +740,7 @@ def _sport_of(slug):
     return "Other"
 
 
-def compute_sport_stats(wallet, per_sport=40, max_positions=8000):
+def compute_sport_stats(wallet, per_sport=400, max_positions=9000):
     """Per-sport realized P&L/ROI over closed positions + pre-game CLV on that sport's biggest $1k+ bets."""
     closed, seen, offset = [], set(), 0
     while offset < max_positions:
@@ -769,7 +766,7 @@ def compute_sport_stats(wallet, per_sport=40, max_positions=8000):
         cost = (p.get("totalBought") or 0) * (p.get("avgPrice") or 0)
         d = by.setdefault(sp, {"cost": 0.0, "pnl": 0.0, "n": 0, "big": []})
         d["cost"] += cost; d["pnl"] += (p.get("realizedPnl") or 0); d["n"] += 1
-        if cost >= 1000:
+        if cost >= 500:
             d["big"].append((cost, p))
     out = {}
     for sp, d in by.items():
@@ -792,7 +789,7 @@ def compute_sport_stats(wallet, per_sport=40, max_positions=8000):
             pre = [t for t in tr if isinstance(t, dict) and t.get("side") == "BUY"
                    and t.get("asset") == p.get("asset") and (t.get("timestamp") or 0) < gs]
             stake = sum((t.get("size") or 0) * (t.get("price") or 0) for t in pre)
-            if stake < 1000:
+            if stake < 500:
                 continue
             vwap = sum((t.get("size") or 0) * (t.get("price") or 0) * (t.get("price") or 0) for t in pre) / stake
             if vwap <= 0.02 or vwap >= 0.98:
@@ -812,8 +809,11 @@ def compute_sport_stats(wallet, per_sport=40, max_positions=8000):
 def _load_sport_stats():
     """Background: per-sport stats are slow (closed-positions paging) so they fill in after the monitor starts."""
     for wallet, label in WALLETS.items():
+        if wallet in sport_stats:
+            continue
         try:
             sport_stats[wallet] = compute_sport_stats(wallet)
+            save_state()
             summ = ", ".join(f"{k}: {v['beat_close_pct']}%/n{v['n']}" for k, v in sport_stats[wallet].items() if v.get("n"))
             print(f"Sport stats {label}: {summ}", flush=True)
         except Exception as e:
@@ -887,6 +887,7 @@ def save_state():
                 "clv_log": clv_log[-2000:],
                 "clv_baseline": clv_baseline,
                 "wallet_cards": wallet_cards,
+                "sport_stats": sport_stats,
                 "alerted_positions": ["|".join(k) for k in alerted_positions],
             }, fh)
     except Exception:
@@ -906,6 +907,7 @@ def load_state():
         clv_log = d.get("clv_log", [])
         clv_baseline.update(d.get("clv_baseline", {}))
         wallet_cards.update(d.get("wallet_cards", {}))
+        sport_stats.update(d.get("sport_stats", {}))
         for k in d.get("alerted_positions", []):
             parts = k.split("|")
             if len(parts) == 4:
