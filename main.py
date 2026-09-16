@@ -21,6 +21,7 @@ WALLETS = {
     "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": "#SeriouslySirius",  # CFB 71% beat, +2.84% CLV (n=251), $3.65M
     "0xb889590a2fab0c810584a660518c4c020325a430": "#Ems123",           # CFB 84% beat, +0.92% CLV (n=25), $961k, avg $46k
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": "#HomeRunHazard",    # CFB 74% beat, +2.63% CLV (n=27), $2.44M
+    "0xf68a281980f8c13828e84e147e3822381d6e5b1b": "#Nooserac",         # CFB 11/11 beat close, +1.44% CLV, $717k (+$98k 30d) - TRIAL, thin n
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -48,6 +49,7 @@ WALLET_MIN_SIZE = {
     "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": 10000,  # #SeriouslySirius (elite in 5 sports; NBA/NHL/soccer avg $22-33k, NFL $144k)
     "0xb889590a2fab0c810584a660518c4c020325a430": 37000,  # #Ems123 (avg $46k)
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": 3200,   # #HomeRunHazard (avg $4k)
+    "0xf68a281980f8c13828e84e147e3822381d6e5b1b": 2800,   # #Nooserac (avg $3.5k)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
