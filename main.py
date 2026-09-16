@@ -1,5 +1,5 @@
 """PolyAlert v2 - pre-game sharp tailing: tailability check, consensus, CLV scoreboard."""
-import os, re, time, threading, requests, statistics, json, fcntl
+import os, re, time, threading, requests, statistics, json, fcntl, unicodedata
 from datetime import datetime, timezone
 from flask import Flask, jsonify
 
@@ -450,6 +450,162 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         print(f"Pinnacle devig error: {e}", flush=True)
         return None
 
+# --- OpticOdds (preferred) -----------------------------------------------------
+# Optic gives Pinnacle 1X2 / Asian handicap / totals with exact lines across far more leagues
+# than The Odds API. If OPTIC_API_KEY is set we use it; otherwise fall back to the Odds API path.
+
+OPTIC_API_KEY = os.environ.get("OPTIC_API_KEY", "")
+_optic_fx_cache = {}     # (sport, day) -> (ts, fixtures)
+
+_OPTIC_SPORT = {"Soccer": "soccer", "MLB": "baseball", "NFL": "football", "CFB": "football",
+                "NBA": "basketball", "CBB": "basketball", "NHL": "hockey", "MMA": "mma", "Tennis": "tennis"}
+_OPTIC_ML     = ("Moneyline",)
+_OPTIC_TOTAL  = ("Total Goals", "Total Points", "Total Runs", "Total Rounds", "Total Games", "Total Sets", "Total")
+_OPTIC_SPREAD = ("Asian Handicap", "Point Spread", "Run Line", "Puck Line", "Spread", "Game Spread", "Set Spread")
+_NAME_STOP = {"will", "win", "on", "vs", "vs.", "fc", "cf", "sc", "ac", "afc", "the", "and", "spread:", "o/u",
+              "de", "1907", "1913", "1901", "club", "sk", "ssa", "sl", "fk", "united", "city"}
+
+def _words(s):
+    """Team-name tokens: accent-stripped, punctuation/digits removed, filler dropped."""
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+    s = re.sub(r"[^a-z\s]", " ", s)
+    return {w for w in s.split() if len(w) >= 3} - _NAME_STOP
+
+def _optic_fixtures(sport, gs):
+    """Fixtures for a sport within +/-3h of game start (cached 10 min)."""
+    key = (sport, int(gs // 3600))
+    hit = _optic_fx_cache.get(key)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    fx = []
+    try:
+        for page in (1, 2, 3, 4, 5):
+            r = requests.get("https://api.opticodds.com/api/v3/fixtures",
+                             params={"key": OPTIC_API_KEY, "sport": sport, "page": page,
+                                     "start_date_after":  datetime.fromtimestamp(gs - 3*3600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                     "start_date_before": datetime.fromtimestamp(gs + 3*3600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+                             timeout=15)
+            if not r.ok:
+                print(f"Optic fixtures {r.status_code}: {r.text[:120]}", flush=True)
+                break
+            d = r.json()
+            fx.extend(d.get("data", []))
+            if not d.get("has_more"):
+                break
+    except Exception as e:
+        print(f"Optic fixtures error: {e}", flush=True)
+    _optic_fx_cache[key] = (time.time(), fx)
+    return fx
+
+def get_optic_devig(event_slug, title, outcome, pm_price, gs):
+    """Pinnacle fair value via OpticOdds. Same return shape as get_pinnacle_devig."""
+    if not OPTIC_API_KEY or not gs:
+        return None
+    sport_name = _sport_of(event_slug)
+    sport = _OPTIC_SPORT.get(sport_name)
+    if not sport:
+        return None
+    title_lower = (title or "").lower()
+    outcome_lower = (outcome or "").lower()
+    if any(x in title_lower for x in ["corner", "card", "1st half", "1h ", "2nd half", "2h ", "quarter", "1q ", "2q ", "3q ", "4q ",
+                                        "touchdown", "yards", "team total", "inning", "player", "anytime", "to score", "odd/even"]):
+        return None
+    is_spread = title_lower.startswith("spread:")
+    is_totals = (not is_spread) and any(x in title_lower for x in ["o/u", "over/under"])
+    line = None
+    if is_spread or is_totals:
+        m = re.search(r"\(?([+-]?\d+(?:\.\d+)?)\)?\s*$", title_lower)
+        if not m:
+            return None
+        line = abs(float(m.group(1)))
+
+    try:
+        # 1) match fixture by team-name overlap
+        tw = _words(title_lower)
+        best, best_s = None, 0
+        for f in _optic_fixtures(sport, gs):
+            names = _words((f.get("home_team_display") or "") + " " + (f.get("away_team_display") or ""))
+            s = len(tw & names)
+            if s > best_s:
+                best_s, best = s, f
+        if not best or best_s < 1:
+            print(f"Optic: no fixture match for '{title}' ({sport})", flush=True)
+            return None
+        # 2) Pinnacle odds for that fixture
+        r = requests.get("https://api.opticodds.com/api/v3/fixtures/odds",
+                         params={"key": OPTIC_API_KEY, "sportsbook": "Pinnacle", "fixture_id": best["id"]}, timeout=15)
+        if not r.ok:
+            print(f"Optic odds {r.status_code}: {r.text[:120]}", flush=True)
+            return None
+        data = r.json().get("data") or []
+        odds = data[0].get("odds", []) if data else []
+        if not odds:
+            print(f"Optic: no Pinnacle odds for {best.get('home_team_display')} v {best.get('away_team_display')}", flush=True)
+            return None
+        want = _OPTIC_SPREAD if is_spread else (_OPTIC_TOTAL if is_totals else _OPTIC_ML)
+        sel = [o for o in odds if o.get("market") in want]
+        if line is not None:
+            sel = [o for o in sel if o.get("points") is not None and abs(abs(float(o["points"])) - line) < 0.01]
+        # prefer a single market name if several match (e.g. both "Asian Handicap" and "Spread")
+        if sel:
+            mname = sel[0]["market"]
+            sel = [o for o in sel if o["market"] == mname]
+        if len(sel) < 2:
+            print(f"Optic: {'line %g ' % line if line is not None else ''}{want[0]} not offered for {best.get('home_team_display')} v {best.get('away_team_display')}", flush=True)
+            return None
+
+        def am_to_prob(p):
+            p = float(p)
+            return 100 / (p + 100) if p > 0 else abs(p) / (abs(p) + 100)
+        raw = {o["name"].lower(): am_to_prob(o["price"]) for o in sel}
+        tot = sum(raw.values())
+        fair = {k: v / tot for k, v in raw.items()}
+        is_3way = len(fair) == 3
+
+        fair_prob = None
+        if outcome_lower in ("over", "under"):
+            for k, v in fair.items():
+                if k.startswith(outcome_lower):
+                    fair_prob = v
+        elif outcome_lower in ("yes", "no"):
+            # "Will X win?" -> X's outcome by title overlap
+            bn, bs = None, 0
+            for k in fair:
+                if k == "draw":
+                    continue
+                s = len(tw & _words(k))
+                if s > bs:
+                    bs, bn = s, k
+            if bn is not None and bs > 0:
+                fair_prob = fair[bn] if outcome_lower == "yes" else 1.0 - fair[bn]
+        else:
+            ow = _words(outcome_lower)
+            bn, bs = None, 0
+            for k in fair:
+                s = len(ow & _words(k))
+                if s > bs:
+                    bs, bn = s, k
+            if bn is not None:
+                fair_prob = fair[bn]
+        if fair_prob is None:
+            print(f"Optic: outcome '{outcome}' not matched in {list(fair)}", flush=True)
+            return None
+
+        gap = round((pm_price - fair_prob) * 100, 2)
+        agrees = pm_price <= fair_prob
+        if abs(gap) <= 1.5:
+            edge_label = "IN-LINE"
+        elif gap < -1.5:
+            edge_label = f"EDGE +{abs(gap):.1f}pp below fair"
+        else:
+            edge_label = f"STALE {gap:+.1f}pp above fair"
+        method = f"{'3way' if is_3way else '2way'}-proportional-devig(pinnacle/optic {sel[0]['market']}" + (f" {line:g}" if line is not None else "") + ")"
+        return {"fair": round(fair_prob, 4), "gap": gap, "agrees": agrees, "edge_label": edge_label,
+                "method": method, "home": best.get("home_team_display"), "away": best.get("away_team_display")}
+    except Exception as e:
+        print(f"Optic devig error: {e}", flush=True)
+        return None
+
 # --- Futures filter ----------------------------------------------------------
 
 FUTURES_TITLE_KW = [
@@ -798,7 +954,7 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
 
     now_price   = get_current_ask(asset) if asset else None
     _, p90_mult = get_market_p90(cid, accumulated)
-    pin         = get_pinnacle_devig(event_slug, title, outcome, now_price or price)
+    pin         = get_optic_devig(event_slug, title, outcome, now_price or price, gs) or get_pinnacle_devig(event_slug, title, outcome, now_price or price)
     profile     = wallet_profiles.get(wallet, {})
     my_clv      = clv_baseline.get(wallet) or clv_stats(wallet).get(wallet)
 
