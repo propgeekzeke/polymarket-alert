@@ -550,6 +550,12 @@ def get_optic_devig(event_slug, title, outcome, pm_price, gs):
         if sel:
             mname = sel[0]["market"]
             sel = [o for o in sel if o["market"] == mname]
+        if is_spread and sel:
+            # Optic lists both -L/+L pairs; keep the pair where the title's favourite is the negative side
+            fav = _words(title_lower.split("spread:", 1)[1].split("(")[0])
+            neg = [o for o in sel if float(o["points"]) < 0 and len(_words(o["name"]) & fav) > 0]
+            pos = [o for o in sel if float(o["points"]) > 0 and len(_words(o["name"]) & fav) == 0]
+            sel = neg[:1] + pos[:1]
         if len(sel) < 2:
             print(f"Optic: {'line %g ' % line if line is not None else ''}{want[0]} not offered for {best.get('home_team_display')} v {best.get('away_team_display')}", flush=True)
             return None
