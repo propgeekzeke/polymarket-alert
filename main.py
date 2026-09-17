@@ -1273,31 +1273,7 @@ BOARD_HTML = """<!DOCTYPE html>
 // const DATA_URL = "https://your-bot.onrender.com/dashboard.json";
 const DATA_URL = (location.pathname.endsWith("/board") ? "/dashboard.json" : "/dashboard.json");
 function money(n){ if(n===null||n===undefined) return '<span class="mut">—</span>';
-  const s=n<0?'neg':'pos'; return '<span class="'+s+'">'+(n<0?'-':'')+'
-    ensure_monitor()
-    return jsonify({
-        "status":          "running",
-        "thread_alive":    _thread.is_alive() if _thread else False,
-        "pid":             os.getpid(),
-        "pinnacle":        bool(ODDS_API_KEY or OPTIC_API_KEY),
-        "optic":           bool(OPTIC_API_KEY),
-        "profiles_loaded": len(wallet_profiles),
-        "clv_logged":      len(clv_log),
-        "clv_graded":      sum(1 for e in clv_log if e.get("clv") is not None),
-    })
-
-
-@app.route("/clv")
-def clv():
-    ensure_monitor()
-    stats = clv_stats()
-    return jsonify({
-        "wallets": {s["label"]: {k: v for k, v in s.items() if k != "label"}
-                    for s in stats.values()},
-        "pending": sum(1 for e in clv_log if e.get("clv") is None and not e.get("failed")),
-        "note": "avg_clv_pp > 0 and beat_close_pct > 50 = wallet still sharp; consider demoting anyone negative over n>=30",
-    })
-+Math.abs(n).toLocaleString()+'</span>'; }
+  const s=n<0?'neg':'pos'; return '<span class="'+s+'">'+(n<0?'-':'')+'$'+Math.abs(n).toLocaleString()+'</span>'; }
 function pct(n,suf){ if(n===null||n===undefined) return '<span class="mut">—</span>';
   const s=n<0?'neg':(n>0?'pos':'mut'); return '<span class="'+s+'">'+(n>0?'+':'')+n+(suf||'')+'</span>'; }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
@@ -1329,31 +1305,7 @@ async function load(){
         inner+='<tr><td style="text-align:left"><a href="https://polymarket.com/event/'+esc(b.slug)+'" target="_blank">'+esc(b.title)+'</a></td>'+
           '<td style="text-align:left">'+esc(b.outcome)+'</td>'+
           '<td>'+b.avg+'c</td><td>'+b.cur+'c</td>'+
-          '<td>
-    ensure_monitor()
-    return jsonify({
-        "status":          "running",
-        "thread_alive":    _thread.is_alive() if _thread else False,
-        "pid":             os.getpid(),
-        "pinnacle":        bool(ODDS_API_KEY or OPTIC_API_KEY),
-        "optic":           bool(OPTIC_API_KEY),
-        "profiles_loaded": len(wallet_profiles),
-        "clv_logged":      len(clv_log),
-        "clv_graded":      sum(1 for e in clv_log if e.get("clv") is not None),
-    })
-
-
-@app.route("/clv")
-def clv():
-    ensure_monitor()
-    stats = clv_stats()
-    return jsonify({
-        "wallets": {s["label"]: {k: v for k, v in s.items() if k != "label"}
-                    for s in stats.values()},
-        "pending": sum(1 for e in clv_log if e.get("clv") is None and not e.get("failed")),
-        "note": "avg_clv_pp > 0 and beat_close_pct > 50 = wallet still sharp; consider demoting anyone negative over n>=30",
-    })
-+ (b.value||0).toLocaleString()+'</td>'+
+          '<td>$'+ (b.value||0).toLocaleString()+'</td>'+
           '<td>'+money(b.pnl)+' '+pct(b.pnl_pct,'%')+'</td>'+
           '<td class="mut">'+fmtDate(b.end)+'</td></tr>';
       });
@@ -1480,6 +1432,22 @@ def health():
         "clv_logged":      len(clv_log),
         "clv_graded":      sum(1 for e in clv_log if e.get("clv") is not None),
     })
+
+
+@app.route("/devig")
+def devig_test():
+    """Debug: /devig?slug=nfl-det-buf-2026-09-18&title=Spread: Bills (-3.5)&outcome=Bills&price=0.56"""
+    from flask import request
+    slug = request.args.get("slug", ""); title = request.args.get("title", ""); outcome = request.args.get("outcome", "")
+    try:
+        price = float(request.args.get("price", "0.5"))
+    except ValueError:
+        price = 0.5
+    gs = get_game_start(slug)
+    return jsonify({"slug": slug, "title": title, "outcome": outcome, "price": price, "game_start": gs,
+                    "optic_key_set": bool(OPTIC_API_KEY), "odds_key_set": bool(ODDS_API_KEY),
+                    "optic": get_optic_devig(slug, title, outcome, price, gs),
+                    "odds_api": get_pinnacle_devig(slug, title, outcome, price)})
 
 
 @app.route("/clv")
