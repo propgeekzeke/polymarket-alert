@@ -62,7 +62,7 @@ WALLET_BLOCK = {
     "0xa804390f80019699ab34a282c0df7528fba82a75": _TENNIS + _ESPORTS,            # #RiverSkew: tennis -0.16% CLV (n=64), esports 43% beat
     "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": _TENNIS + _ESPORTS + ("nhl-",),# #Sharp2a2C: edge is CBB+soccer; NHL/esports in-line, tennis -$1.69M
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": ("nfl-", "cfb-"),               # #Whale2c33: NFL 29% beat / -2.59% CLV, CFB 36% beat
-    "0x5268527977f700f9bf9b6d5cd843859e4e70135d": _TENNIS + ("mlb-",),           # #HomeRunHazard: MLB grinder (52% beat, 66% live), tennis 94% live
+    "0x5268527977f700f9bf9b6d5cd843859e4e70135d": _TENNIS + ("mlb-", "nfl-"),   # #HomeRunHazard: CFB only - MLB grinder, tennis 94% live, NFL leaned bets -$43k
     "0x709e8dcb133555794decc598e07f2c923b8366f5": ("ufc-", "mlb-", "nhl-"),       # #0X70: -$515k combined, tiny samples
 }
 
@@ -80,7 +80,10 @@ clv_log = []             # alerted BUYs pending/graded vs closing line
 clv_baseline = {}        # wallet -> historical CLV stats (computed at startup, EV-style %)
 wallet_cards = {}        # wallet -> {avg_bet, all_pnl, all_roi, soc_pnl, soc_roi} for alerts
 sport_stats  = {}        # wallet -> {sport: {positions, cost, pnl, roi, n, avg_clv_pp, beat_close_pct}} (background-loaded)
-alerted_positions = set()  # (wallet, eventSlug, outcome, side) already pinged - prevents double pings
+alerted_positions = set()
+alerted_markets   = {}       # (wallet, conditionId) -> {outcome, title, size}: markets we pinged (for hedge detection)
+hedge_progress    = {}       # (wallet, conditionId, outcome) -> USDC bought on the opposite side pre-game
+hedge_alerted     = set()    # (wallet, conditionId, outcome) already flagged  # (wallet, eventSlug, outcome, side) already pinged - prevents double pings
 
 _thread = None
 _thread_lock = threading.Lock()
@@ -1041,6 +1044,27 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
                         "ts": trade.get("timestamp", 0), "clv": None})
 
 
+def send_hedge_alert(label, wallet, title, orig, new_outcome, new_size, price, gs):
+    """Follow-up when a pinged wallet buys the other side of the same market pre-game."""
+    osz = orig.get("size") or 0
+    net = (osz - new_size) / osz * 100 if osz else 0
+    if net > 50:
+        verdict = f"still leaning **{orig['outcome']}** (net {net:.0f}% of original)"
+    elif net > 0:
+        verdict = f"mostly hedged (net {net:.0f}% left on {orig['outcome']})"
+    else:
+        verdict = f"**flipped** - now bigger on {new_outcome}"
+    lines = [
+        f"<@{DISCORD_USER_ID}>",
+        f"\u26a0\ufe0f **HEDGE -- {label}** | PRE-GAME ({_countdown(gs)})",
+        f"**{title}**",
+        f"Pinged **{orig['outcome']}** ${osz:,.0f} -> now bought **{new_outcome}** ${new_size:,.0f} @ {round(price*100,1)}c",
+        verdict,
+        f"<https://polymarket.com/@{wallet}>",
+    ]
+    _post_discord("\n".join(lines))
+
+
 def send_consensus_alert(event_slug, outcome, title, book, trade):
     gs = game_starts.get(event_slug)
     names = [f"{WALLETS.get(w, w[:8])} (${amt:,.0f})" for w, amt in
@@ -1100,6 +1124,18 @@ def handle_trade(trade, label, wallet):
             consensus_alerted.add((event_slug, outcome))
             send_consensus_alert(event_slug, outcome, title, book, trade)
 
+    # Hedge detection: wallet buys the OPPOSITE side of a market we already pinged -> follow-up warning
+    cid = trade.get("conditionId", "")
+    orig = alerted_markets.get((wallet, cid))
+    if side == "BUY" and orig and orig["outcome"] != outcome:
+        hk = (wallet, cid, outcome)
+        if hk not in hedge_alerted:
+            hedge_progress[hk] = hedge_progress.get(hk, 0) + fill_size
+            if hedge_progress[hk] >= max(1000, 0.25 * WALLET_MIN_SIZE.get(wallet, MIN_SIZE)):
+                hedge_alerted.add(hk)
+                send_hedge_alert(label, wallet, title, orig, outcome, hedge_progress[hk], trade.get("price", 0), gs)
+        return
+
     pkey = (wallet, event_slug, outcome, side)
     if pkey in alerted_positions:   # already pinged this position -> suppress multi-fill/add double pings
         return
@@ -1108,6 +1144,8 @@ def handle_trade(trade, label, wallet):
         return
     accumulated = alert_progress.pop(pkey)
     alerted_positions.add(pkey)
+    if side == "BUY" and cid:
+        alerted_markets[(wallet, cid)] = {"outcome": outcome, "title": title, "size": accumulated}
     send_discord_alert(trade, label, wallet, gs, accumulated)
 
 # --- Monitor loop ------------------------------------------------------------
