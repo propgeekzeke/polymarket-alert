@@ -73,6 +73,7 @@ watermarks = {}          # wallet -> newest processed trade ts
 position_totals = {}     # (wallet, eventSlug, outcome) -> running USDC total
 wallet_profiles = {}     # wallet -> profile dict (cached at startup)
 game_starts = {}         # eventSlug -> game start ts (None = no game time found)
+event_titles = {}        # eventSlug -> event title (e.g. "Iowa vs. Michigan") for fixture matching
 consensus_book = {}      # (eventSlug, outcome) -> {wallet: total USDC}
 consensus_alerted = set()  # (eventSlug, outcome) already alerted
 alert_progress = {}      # (wallet, eventSlug, outcome, side) -> USDC accumulated since last alert
@@ -134,6 +135,8 @@ def get_game_start(event_slug):
         evs = requests.get("https://gamma-api.polymarket.com/events",
                            params={"slug": event_slug}, timeout=10).json()
         if evs:
+            if evs[0].get("title"):
+                event_titles[event_slug] = evs[0]["title"]
             for m in evs[0].get("markets", []):
                 g = m.get("gameStartTime")
                 if g:
@@ -523,14 +526,19 @@ def get_optic_devig(event_slug, title, outcome, pm_price, gs):
         line = abs(float(m.group(1)))
 
     try:
-        # 1) match fixture by team-name overlap
-        tw = _words(title_lower)
-        best, best_s = None, 0
+        # 1) match fixture by team-name overlap. Use the EVENT title ("Iowa vs. Michigan") when we have it -
+        #    spread/total titles only name one team, and "Michigan" alone matches four Saturday fixtures.
+        tw = _words(event_titles.get(event_slug) or title_lower) | _words(title_lower)
+        best, best_s, best_dt = None, 0, 1e12
         for f in _optic_fixtures(sport, gs):
             names = _words((f.get("home_team_display") or "") + " " + (f.get("away_team_display") or ""))
             s = len(tw & names)
-            if s > best_s:
-                best_s, best = s, f
+            try:
+                dt = abs(datetime.fromisoformat((f.get("start_date") or "").replace("Z", "+00:00")).timestamp() - gs)
+            except Exception:
+                dt = 1e12
+            if s > best_s or (s == best_s and s > 0 and dt < best_dt):
+                best_s, best, best_dt = s, f, dt
         if not best or best_s < 1:
             print(f"Optic: no fixture match for '{title}' ({sport})", flush=True)
             return None
