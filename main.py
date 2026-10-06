@@ -23,6 +23,7 @@ WALLETS = {
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": "#HomeRunHazard",    # CFB 74% beat, +2.63% CLV (n=27), $2.44M
     "0xf68a281980f8c13828e84e147e3822381d6e5b1b": "#Nooserac",         # CFB 11/11 beat close, +1.44% CLV, $717k (+$98k 30d) - TRIAL, thin n
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": "#RoyaleStake",      # NHL: +1.00% CLV, 57% beat (n=233 full season), $198k, pre-game ML bettor - TRIAL
+    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": "#Elenes",           # Soccer +$213k official; 32% beat close but strong results - TRIAL, soccer only
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -52,6 +53,7 @@ WALLET_MIN_SIZE = {
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": 3200,   # #HomeRunHazard (avg $4k)
     "0xf68a281980f8c13828e84e147e3822381d6e5b1b": 2800,   # #Nooserac (avg $3.5k)
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": 1500,   # #RoyaleStake (avg $3.2k; size is not a signal for him, ping everything >=1.5k)
+    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": 8000,   # #Elenes (pre-game avg $10.2k)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
@@ -67,6 +69,7 @@ WALLET_BLOCK = {
     "0x5268527977f700f9bf9b6d5cd843859e4e70135d": _TENNIS + ("mlb-", "nfl-"),   # #HomeRunHazard: CFB only - MLB grinder, tennis 94% live, NFL leaned bets -$43k
     "0x709e8dcb133555794decc598e07f2c923b8366f5": ("ufc-", "mlb-", "nhl-"),       # #0X70: -$515k combined, tiny samples
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": _TENNIS + _ESPORTS + ("cfb-", "nfl-", "mlb-", "nba-", "wnba-", "cbb-", "ufc-"),  # #RoyaleStake: NHL only (CFB 43% beat)
+    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": _TENNIS + _ESPORTS + ("nhl-", "nfl-", "cfb-", "nba-", "wnba-", "cbb-", "mlb-", "ufc-"),  # #Elenes: soccer only (NHL -43% ROI)
 }
 
 # --- Runtime state -----------------------------------------------------------
