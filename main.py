@@ -593,14 +593,21 @@ def get_optic_devig(event_slug, title, outcome, pm_price, gs):
                 if k.startswith(outcome_lower):
                     fair_prob = v
         elif outcome_lower in ("yes", "no"):
-            # "Will X win?" -> X's outcome by title overlap
+            # "Will X win?" -> X's outcome. Match on the MARKET question only (the event title names both
+            # teams and caused ties), and credit acronyms ("Sporting CP" -> Sporting Clube de Portugal).
+            mw = _words(title_lower)
+            acr = [a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", title or "")]
             bn, bs = None, 0
             for k in fair:
                 if k == "draw":
                     continue
-                s = len(tw & _words(k))
-                if s > bs:
-                    bs, bn = s, k
+                kw = _words(k)
+                sc = len(mw & kw)
+                initials = "".join(t[0] for t in unicodedata.normalize("NFKD", k).encode("ascii", "ignore").decode().lower().split() if t not in _NAME_STOP)
+                if any(a in initials for a in acr):
+                    sc += 1
+                if sc > bs:
+                    bs, bn = sc, k
             if bn is not None and bs > 0:
                 fair_prob = fair[bn] if outcome_lower == "yes" else 1.0 - fair[bn]
         else:
