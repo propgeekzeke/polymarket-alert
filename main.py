@@ -11,19 +11,14 @@ WALLETS = {
     "0xa804390f80019699ab34a282c0df7528fba82a75": "#RiverSkew",    # 65% beat, +2.16% CLV (n=154), $389k
     "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": "#Hot2Trot",     # 67% beat, +2.67% CLV (n=33), soccer whale $2.11M
     "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": "#Sharp2a2C",    # 70% beat, +0.88% CLV (n=20), $4.31M
-    "0x709e8dcb133555794decc598e07f2c923b8366f5": "#0X70",         # 67% beat, +0.91% CLV (n=15), big bettor
     "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": "#Gardiner",     # 60% beat, +0.76% CLV (n=166), $207k
     "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": "#Sharp076d",    # 71% beat, +1.82% CLV / +3.14% wtd (n=21), $3.76M, soccer +15.6% ROI
     # Whales: don't beat CLV (likely bet late to hide it) but hugely profitable - tail on selection
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": "#Whale2c33",    # $6.52M all-time, in-line CLV
-    "0x204f72f35326db932158cba6adff0b9a1da95e14": "#SwissTony",    # $19.34M all-time, in-line CLV
     # CFB specialists (prober 2026-09-12: 567 games / 9,112 markets scanned, full-history pre-game CLV)
     "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": "#SeriouslySirius",  # CFB 71% beat, +2.84% CLV (n=251), $3.65M
     "0xb889590a2fab0c810584a660518c4c020325a430": "#Ems123",           # CFB 84% beat, +0.92% CLV (n=25), $961k, avg $46k
-    "0x5268527977f700f9bf9b6d5cd843859e4e70135d": "#HomeRunHazard",    # CFB 74% beat, +2.63% CLV (n=27), $2.44M
-    "0xf68a281980f8c13828e84e147e3822381d6e5b1b": "#Nooserac",         # CFB 11/11 beat close, +1.44% CLV, $717k (+$98k 30d) - TRIAL, thin n
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": "#RoyaleStake",      # NHL: +1.00% CLV, 57% beat (n=233 full season), $198k, pre-game ML bettor - TRIAL
-    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": "#Elenes",           # Soccer +$213k official; 32% beat close but strong results - TRIAL, soccer only
     # Prober 2026-10-09: 4,794 markets / 3,420 wallets scanned, full-history trade-based CLV
     "0x924379a79c64b77ad5816ad362122a5f6228658e": "#KchTemp",          # 68% beat, +1.13% CLV (n=236, 0% live); NFL 78%/n55; $2.51M, avg $47k
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BreakTheBank",     # 71% beat, +1.91% CLV (n=119); soccer +4.18%/71%, NFL 69%; $5.08M, avg $28k
@@ -47,17 +42,12 @@ WALLET_MIN_SIZE = {
     "0xa804390f80019699ab34a282c0df7528fba82a75": 5000,   # #RiverSkew (avg $6.4k)
     "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": 85000,  # #Hot2Trot (avg $108k)
     "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": 30000,  # #Sharp2a2C (avg $38k)
-    "0x709e8dcb133555794decc598e07f2c923b8366f5": 150000, # #0X70 (avg $185k)
     "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": 5500,   # #Gardiner (avg $7k)
     "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": 6500,   # #Sharp076d (avg $8.1k)
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 75000,  # #Whale2c33 (conviction floor; skips market-making)
-    "0x204f72f35326db932158cba6adff0b9a1da95e14": 50000,  # #SwissTony (conviction floor; skips market-making)
     "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": 10000,  # #SeriouslySirius (elite in 5 sports; NBA/NHL/soccer avg $22-33k, NFL $144k)
     "0xb889590a2fab0c810584a660518c4c020325a430": 37000,  # #Ems123 (avg $46k)
-    "0x5268527977f700f9bf9b6d5cd843859e4e70135d": 3200,   # #HomeRunHazard (avg $4k)
-    "0xf68a281980f8c13828e84e147e3822381d6e5b1b": 2800,   # #Nooserac (avg $3.5k)
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": 1500,   # #RoyaleStake (avg $3.2k; size is not a signal for him, ping everything >=1.5k)
-    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": 8000,   # #Elenes (pre-game avg $10.2k)
     "0x924379a79c64b77ad5816ad362122a5f6228658e": 38000,  # #KchTemp (avg $47k; his >=80% bets beat close 74%)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 22000,  # #BreakTheBank (avg $28k)
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": 8000,   # #Bc43 (NFL avg $25k, NBA $3k)
@@ -78,10 +68,7 @@ WALLET_BLOCK = {
     "0xa804390f80019699ab34a282c0df7528fba82a75": _TENNIS + _ESPORTS,            # #RiverSkew: tennis -0.16% CLV (n=64), esports 43% beat
     "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": _TENNIS + _ESPORTS + ("nhl-",),# #Sharp2a2C: edge is CBB+soccer; NHL/esports in-line, tennis -$1.69M
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": ("nfl-", "cfb-"),               # #Whale2c33: NFL 29% beat / -2.59% CLV, CFB 36% beat
-    "0x5268527977f700f9bf9b6d5cd843859e4e70135d": _TENNIS + ("mlb-", "nfl-"),   # #HomeRunHazard: CFB only - MLB grinder, tennis 94% live, NFL leaned bets -$43k
-    "0x709e8dcb133555794decc598e07f2c923b8366f5": ("ufc-", "mlb-", "nhl-"),       # #0X70: -$515k combined, tiny samples
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": _TENNIS + _ESPORTS + ("cfb-", "nfl-", "mlb-", "nba-", "wnba-", "cbb-", "ufc-"),  # #RoyaleStake: NHL only (CFB 43% beat)
-    "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": _TENNIS + _ESPORTS + ("nhl-", "nfl-", "cfb-", "nba-", "wnba-", "cbb-", "mlb-", "ufc-"),  # #Elenes: soccer only (NHL -43% ROI)
     "0x924379a79c64b77ad5816ad362122a5f6228658e": _TENNIS + _ESPORTS + ("ufc-",),                     # #KchTemp: tennis -1.05% CLV
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": _TENNIS + _ESPORTS + ("nba-", "wnba-"),             # #BreakTheBank: NBA -1.60% CLV
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": _TENNIS + _ESPORTS + ("nhl-", "ufc-", "cfb-", "cbb-"),  # #Bc43: NFL/NBA/MLB only (soccer handled below)
