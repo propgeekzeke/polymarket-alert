@@ -24,6 +24,10 @@ WALLETS = {
     "0xf68a281980f8c13828e84e147e3822381d6e5b1b": "#Nooserac",         # CFB 11/11 beat close, +1.44% CLV, $717k (+$98k 30d) - TRIAL, thin n
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": "#RoyaleStake",      # NHL: +1.00% CLV, 57% beat (n=233 full season), $198k, pre-game ML bettor - TRIAL
     "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": "#Elenes",           # Soccer +$213k official; 32% beat close but strong results - TRIAL, soccer only
+    # Prober 2026-10-09: 4,794 markets / 3,420 wallets scanned, full-history trade-based CLV
+    "0x924379a79c64b77ad5816ad362122a5f6228658e": "#KchTemp",          # 68% beat, +1.13% CLV (n=236, 0% live); NFL 78%/n55; $2.51M, avg $47k
+    "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BreakTheBank",     # 71% beat, +1.91% CLV (n=119); soccer +4.18%/71%, NFL 69%; $5.08M, avg $28k
+    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": "#Bc43",             # NFL 68%/n63, NBA 74%/n31; soccer/NHL blocked; +$1.19M 30d - TRIAL
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -54,12 +58,20 @@ WALLET_MIN_SIZE = {
     "0xf68a281980f8c13828e84e147e3822381d6e5b1b": 2800,   # #Nooserac (avg $3.5k)
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": 1500,   # #RoyaleStake (avg $3.2k; size is not a signal for him, ping everything >=1.5k)
     "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": 8000,   # #Elenes (pre-game avg $10.2k)
+    "0x924379a79c64b77ad5816ad362122a5f6228658e": 38000,  # #KchTemp (avg $47k; his >=80% bets beat close 74%)
+    "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 22000,  # #BreakTheBank (avg $28k)
+    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": 8000,   # #Bc43 (NFL avg $25k, NBA $3k)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
 # in-play grinding with 52% beat-close pre-game (n=96) and esports is noise; never ping those.
 _TENNIS  = ("atp-", "wta-")
 _ESPORTS = ("lol-", "cs-", "cs2-", "val-", "dota-", "esports-", "r6-", "rl-")
+# Sport-name blocks (for sports without a fixed slug prefix, e.g. soccer)
+WALLET_BLOCK_SPORTS = {
+    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": ("Soccer",),   # #Bc43: soccer 45% beat
+}
+
 WALLET_BLOCK = {
     # per-sport test 2026-09-14 (per_sport_report_2026-09-14.md): block sports with no pre-game CLV edge
     "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": _TENNIS + _ESPORTS,            # #Sharp076d: soccer only (tennis 50% beat, 56% live)
@@ -70,6 +82,9 @@ WALLET_BLOCK = {
     "0x709e8dcb133555794decc598e07f2c923b8366f5": ("ufc-", "mlb-", "nhl-"),       # #0X70: -$515k combined, tiny samples
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": _TENNIS + _ESPORTS + ("cfb-", "nfl-", "mlb-", "nba-", "wnba-", "cbb-", "ufc-"),  # #RoyaleStake: NHL only (CFB 43% beat)
     "0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737": _TENNIS + _ESPORTS + ("nhl-", "nfl-", "cfb-", "nba-", "wnba-", "cbb-", "mlb-", "ufc-"),  # #Elenes: soccer only (NHL -43% ROI)
+    "0x924379a79c64b77ad5816ad362122a5f6228658e": _TENNIS + _ESPORTS + ("ufc-",),                     # #KchTemp: tennis -1.05% CLV
+    "0xf0318c32136c2db7fec88b84869aee6a1106c80c": _TENNIS + _ESPORTS + ("nba-", "wnba-"),             # #BreakTheBank: NBA -1.60% CLV
+    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": _TENNIS + _ESPORTS + ("nhl-", "ufc-", "cfb-", "cbb-"),  # #Bc43: NFL/NBA/MLB only (soccer handled below)
 }
 
 # --- Runtime state -----------------------------------------------------------
@@ -1114,6 +1129,8 @@ def handle_trade(trade, label, wallet):
     if _is_prop_noise(title, event_slug):
         return
     if any(event_slug.startswith(p) for p in WALLET_BLOCK.get(wallet, ())):
+        return
+    if _sport_of(event_slug) in WALLET_BLOCK_SPORTS.get(wallet, ()):
         return
 
     fill_size = trade.get("usdcSize", 0)
