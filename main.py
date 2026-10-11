@@ -1142,12 +1142,17 @@ def handle_trade(trade, label, wallet):
     key = (wallet, event_slug, outcome)
     position_totals[key] = position_totals.get(key, 0) + (fill_size if side == "BUY" else -fill_size)
 
-    if side == "BUY" and fill_size >= CONSENSUS_MIN:
-        book = consensus_book.setdefault((event_slug, outcome), {})
+    # Consensus: keyed by MARKET (conditionId), not event - "Eagles" on the ML and "Eagles" on a spread are
+    # different bets. A wallet only counts once it has >= 25% of its own conviction threshold on that market.
+    ckey = (trade.get("conditionId") or event_slug, outcome)
+    if side == "BUY":
+        book = consensus_book.setdefault(ckey, {})
         book[wallet] = book.get(wallet, 0) + fill_size
-        if len(book) >= 2 and (event_slug, outcome) not in consensus_alerted:
-            consensus_alerted.add((event_slug, outcome))
-            send_consensus_alert(event_slug, outcome, title, book, trade)
+        qualified = {w: amt for w, amt in book.items()
+                     if amt >= max(CONSENSUS_MIN, 0.25 * WALLET_MIN_SIZE.get(w, MIN_SIZE))}
+        if len(qualified) >= 2 and ckey not in consensus_alerted:
+            consensus_alerted.add(ckey)
+            send_consensus_alert(event_slug, outcome, title, qualified, trade)
 
     # Hedge detection: wallet buys the OPPOSITE side of a market we already pinged -> follow-up warning
     cid = trade.get("conditionId", "")
@@ -1219,10 +1224,8 @@ def monitor_loop():
                 cutoff = time.time() - 48 * 3600
                 for tx in [t for t, ts in seen_hashes.items() if ts and ts < cutoff]:
                     del seen_hashes[tx]
-                for k in list(consensus_book):
-                    g = game_starts.get(k[0])
-                    if g and time.time() > g:
-                        del consensus_book[k]
+                if len(consensus_book) > 3000:
+                    consensus_book.clear()
                 for k in list(alert_progress):
                     g = game_starts.get(k[1])
                     if g and time.time() > g:
