@@ -98,6 +98,7 @@ _thread = None
 _thread_lock = threading.Lock()
 _seeded = False
 _monitor_owner = None    # None=undecided, True=this process runs the monitor, False=another does
+_lock_pid = None         # pid that made the lock decision (fork detection)
 
 # Slug keyword -> The Odds API sport key
 SPORT_MAP = [
@@ -1242,9 +1243,14 @@ def monitor_loop():
 
 def ensure_monitor():
     """Load state, seed seen hashes + wallet profiles, start polling thread."""
-    global _thread, _seeded, _monitor_owner
+    global _thread, _seeded, _monitor_owner, _lock_pid
     with _thread_lock:
+        # Fork safety: gunicorn forks workers from the master AFTER import, so a child inherits
+        # _monitor_owner=True without actually holding its own lock. Re-decide in every new pid.
+        if _monitor_owner is not None and _lock_pid != os.getpid():
+            _monitor_owner, _thread = None, None
         if _monitor_owner is None:
+            _lock_pid = os.getpid()
             # Singleton monitor: only the process that grabs this file lock polls + alerts,
             # so duplicate gunicorn workers can't each fire their own identical alerts.
             try:
@@ -1284,7 +1290,8 @@ def ensure_monitor():
             _thread.start()
 
 
-ensure_monitor()
+# NOTE: do NOT call ensure_monitor() at import time - under gunicorn the master imports this module and
+# would start a monitor thread of its own alongside the worker's (double alerts). Routes call it instead.
 
 
 
