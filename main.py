@@ -1498,6 +1498,8 @@ def health():
         "status":          "running",
         "thread_alive":    _thread.is_alive() if _thread else False,
         "pid":             os.getpid(),
+        "instance":        os.environ.get("RENDER_INSTANCE_ID", ""),
+        "monitor_owner":   _monitor_owner,
         "pinnacle":        bool(ODDS_API_KEY or OPTIC_API_KEY),
         "optic":           bool(OPTIC_API_KEY),
         "profiles_loaded": len(wallet_profiles),
