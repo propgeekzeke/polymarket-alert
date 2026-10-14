@@ -52,7 +52,7 @@ WALLET_MIN_SIZE = {
     "0x924379a79c64b77ad5816ad362122a5f6228658e": 38000,  # #KchTemp (avg $47k; his >=80% bets beat close 74%)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 22000,  # #BreakTheBank (avg $28k)
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": 8000,   # #Bc43 (NFL avg $25k, NBA $3k)
-    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": 2500,   # #VeryLucky888 (avg $3k)
+    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": 4000,   # #VeryLucky888 (avg $3k; >=80%-of-avg bets beat close 69% - filter the inventory noise)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
