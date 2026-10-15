@@ -88,6 +88,7 @@ event_titles = {}        # eventSlug -> event title (e.g. "Iowa vs. Michigan") f
 consensus_book = {}      # (eventSlug, outcome) -> {wallet: total USDC}
 consensus_alerted = set()  # (eventSlug, outcome) already alerted
 alert_progress = {}      # (wallet, eventSlug, outcome, side) -> USDC accumulated since last alert
+alert_pxsum = {}         # same key -> sum(USDC * price) for entry VWAP
 clv_log = []             # alerted BUYs pending/graded vs closing line
 clv_baseline = {}        # wallet -> historical CLV stats (computed at startup, EV-style %)
 wallet_cards = {}        # wallet -> {avg_bet, all_pnl, all_roi, soc_pnl, soc_roi} for alerts
@@ -330,6 +331,20 @@ def _detect_sport_key(event_slug):
     return None
 
 
+def _power_devig(raw):
+    """Power devig: find k so that sum(p_i ** k) == 1, fair_i = p_i ** k. raw = {name: implied prob}."""
+    lo, hi = 1.0, 20.0
+    for _ in range(60):
+        k = (lo + hi) / 2
+        tot = sum(p ** k for p in raw.values())
+        if tot > 1.0:
+            lo = k
+        else:
+            hi = k
+    k = (lo + hi) / 2
+    return {n: p ** k for n, p in raw.items()}
+
+
 def get_pinnacle_devig(event_slug, title, outcome, pm_price):
     """Fetch Pinnacle odds, devig to fair probability, compare to pm_price.
     Handles 1X2/h2h, spreads (line must match) and game totals (line must match)."""
@@ -410,8 +425,7 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
             return 100 / (p + 100) if p > 0 else abs(p) / (abs(p) + 100)
 
         raw_probs = {o["name"].lower(): am_to_prob(o["price"]) for o in outcomes}
-        total = sum(raw_probs.values())
-        fair = {k: v / total for k, v in raw_probs.items()}
+        fair = _power_devig(raw_probs)
 
         def team_match(name):
             return len((set(name.replace("-", " ").split()) - STOP) & (set(outcome_lower.replace("-", " ").split()) - STOP))
@@ -454,7 +468,7 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         else:
             edge_label = f"STALE {gap:+.1f}pp above fair"
 
-        method = f"{'3way' if is_3way else '2way'}-proportional-devig(pinnacle {market_type}" + (f" {line:g}" if line is not None else "") + ")"
+        method = f"{'3way' if is_3way else '2way'}-power-devig(pinnacle {market_type}" + (f" {line:g}" if line is not None else "") + ")"
         return {
             "fair":       round(fair_prob, 4),
             "gap":        gap,
@@ -587,8 +601,7 @@ def get_optic_devig(event_slug, title, outcome, pm_price, gs):
             p = float(p)
             return 100 / (p + 100) if p > 0 else abs(p) / (abs(p) + 100)
         raw = {o["name"].lower(): am_to_prob(o["price"]) for o in sel}
-        tot = sum(raw.values())
-        fair = {k: v / tot for k, v in raw.items()}
+        fair = _power_devig(raw)
         is_3way = len(fair) == 3
 
         fair_prob = None
@@ -635,7 +648,7 @@ def get_optic_devig(event_slug, title, outcome, pm_price, gs):
             edge_label = f"EDGE +{abs(gap):.1f}pp below fair"
         else:
             edge_label = f"STALE {gap:+.1f}pp above fair"
-        method = f"{'3way' if is_3way else '2way'}-proportional-devig(pinnacle/optic {sel[0]['market']}" + (f" {line:g}" if line is not None else "") + ")"
+        method = f"{'3way' if is_3way else '2way'}-power-devig(pinnacle/optic {sel[0]['market']}" + (f" {line:g}" if line is not None else "") + ")"
         return {"fair": round(fair_prob, 4), "gap": gap, "agrees": agrees, "edge_label": edge_label,
                 "method": method, "home": best.get("home_team_display"), "away": best.get("away_team_display")}
     except Exception as e:
@@ -979,33 +992,30 @@ def _countdown(gs):
     return f"starts in {mins // 60}h {mins % 60:02d}m" if mins >= 60 else f"starts in {mins}m"
 
 
-def send_discord_alert(trade, label, wallet, gs, accumulated=None):
+def send_discord_alert(trade, label, wallet, gs, accumulated=None, entry_price=None):
     side       = trade.get("side", "")
     event_slug = trade.get("eventSlug", "")
     outcome    = trade.get("outcome", "")
     title      = trade.get("title", "")
     fill_size  = trade.get("usdcSize", 0)
-    price      = trade.get("price", 0)
+    price      = entry_price or trade.get("price", 0)      # what THEY paid (VWAP of the fills that triggered this)
     asset      = trade.get("asset", "")
-    cid        = trade.get("conditionId", "")
 
     if accumulated is None:
         accumulated = fill_size
     total = position_totals.get((wallet, event_slug, outcome), fill_size)
 
-    now_price   = get_current_ask(asset) if asset else None
-    _, p90_mult = get_market_p90(cid, accumulated)
-    pin         = get_optic_devig(event_slug, title, outcome, now_price or price, gs) or get_pinnacle_devig(event_slug, title, outcome, now_price or price)
-    profile     = wallet_profiles.get(wallet, {})
-    my_clv      = clv_baseline.get(wallet) or clv_stats(wallet).get(wallet)
+    # Fair value vs the price they paid (power devig of Pinnacle via Optic, Odds API fallback)
+    pin     = get_optic_devig(event_slug, title, outcome, price, gs) or get_pinnacle_devig(event_slug, title, outcome, price)
+    profile = wallet_profiles.get(wallet, {})
+    my_clv  = clv_baseline.get(wallet) or clv_stats(wallet).get(wallet)
 
     emoji  = "\U0001f7e2" if side == "BUY" else "\U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
 
     avg_stake = profile.get("avg_stake") if profile else None
     if avg_stake:
-        mult = accumulated / avg_stake
-        bet_line = f"Bet **${accumulated:,.0f}**  ({mult:.1f}x their avg bet of ${avg_stake:,})"
+        bet_line = f"Bet **${accumulated:,.0f}**  ({accumulated / avg_stake:.1f}x their avg bet of ${avg_stake:,})"
     else:
         bet_line = f"Bet **${accumulated:,.0f}**"
     if total and abs(total) > accumulated * 1.05:
@@ -1013,52 +1023,36 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None):
 
     lines = [
         f"<@{DISCORD_USER_ID}>",
-        f"{emoji} **{action} -- {label} (Sharp)** | PRE-GAME ({_countdown(gs)})",
+        f"{emoji} **{action} -- {label}** | PRE-GAME ({_countdown(gs)})",
         f"**{title}**",
-        f"{side} **{outcome}** @ {round(price*100,1)}c  ({price_to_american(price)})",
+        f"{side} **{outcome}** @ **{round(price*100,1)}c**  ({price_to_american(price)})",
         bet_line,
     ]
 
-    meta = []
-    if p90_mult:
-        meta.append(f"\U0001f4ca **{p90_mult}x mkt p90**")
     if pin:
-        ev_tag = "✅ **+EV vs Pinnacle**" if pin["agrees"] else "❌ **-EV vs Pinnacle**"
-        meta.append(ev_tag)
-    if meta:
-        lines.append("  |  ".join(meta))
-
-    if pin:
-        ref = now_price if now_price is not None else price
-        gap_str = f"{'+' if pin['gap'] > 0 else ''}{pin['gap']}pp"
-        lines.append(
-            f"\U0001f3af Pinnacle fair **{round(pin['fair']*100,1)}c** vs PM **{round(ref*100,1)}c**"
-            f" -> **{gap_str}** - {pin['edge_label']}"
-        )
-        lines.append(f"_{pin['method']} - {pin['home']} vs {pin['away']}_")
+        plus_ev = price <= pin["fair"]
+        lines.append(f"\U0001f3af Pinnacle fair **{round(pin['fair']*100,1)}c**  ·  paid **{round(price*100,1)}c**  ·  "
+                     f"+EV: **{'Yes' if plus_ev else 'No'}** ({(pin['fair'] - price)*100:+.1f}c)")
+    else:
+        lines.append("\U0001f3af Pinnacle fair: n/a")
 
     card  = wallet_cards.get(wallet, {})
     sport = _sport_of(event_slug)
     ss    = (sport_stats.get(wallet) or {}).get(sport) or {}
     if ss.get("n"):
-        lines.append(f"\U0001f4c8 **{sport} CLV {ss['avg_clv_pp']:+.2f}%** avg  ·  "
-                     f"beats close **{ss['beat_close_pct']}%**  ·  n={ss['n']}")
+        lines.append(f"\U0001f4c8 **{sport} EV {ss['avg_clv_pp']:+.2f}%** avg  ·  beats close **{ss['beat_close_pct']}%**  ·  n={ss['n']}")
     elif my_clv:
-        lines.append(f"\U0001f4c8 **CLV {my_clv['avg_clv_pp']:+.2f}%** avg (all sports)  ·  "
-                     f"beats close **{my_clv['beat_close_pct']}%**  ·  n={my_clv['n']}")
+        lines.append(f"\U0001f4c8 **EV {my_clv['avg_clv_pp']:+.2f}%** avg (all sports)  ·  beats close **{my_clv['beat_close_pct']}%**  ·  n={my_clv['n']}")
+
     stat = []
     allp = card.get("all_pnl"); allr = card.get("all_roi")
     if allp is not None:
-        a = "▲" if allp >= 0 else "▼"
-        stat.append(f"All-time {a} **${abs(allp):,}**" + (f" ({allr:+g}% ROI)" if allr is not None else ""))
+        stat.append(f"All-time {'▲' if allp >= 0 else '▼'} **${abs(allp):,}**" + (f" ({allr:+g}% ROI)" if allr is not None else ""))
     if ss.get("pnl") is not None:
-        a = "▲" if ss["pnl"] >= 0 else "▼"
-        stat.append(f"{sport} {a} **${abs(ss['pnl']):,}**"
-                    + (f" ({ss['roi']:+g}% ROI, {ss['positions']} bets)" if ss.get("roi") is not None else ""))
+        stat.append(f"{sport} {'▲' if ss['pnl'] >= 0 else '▼'} **${abs(ss['pnl']):,}**" + (f" ({ss['roi']:+g}% ROI)" if ss.get("roi") is not None else ""))
     elif sport == "Soccer" and card.get("soc_pnl") is not None:
         socp = card["soc_pnl"]; socr = card.get("soc_roi")
-        a = "▲" if socp >= 0 else "▼"
-        stat.append(f"Soccer {a} **${abs(socp):,}**" + (f" ({socr:+g}% ROI)" if socr is not None else ""))
+        stat.append(f"Soccer {'▲' if socp >= 0 else '▼'} **${abs(socp):,}**" + (f" ({socr:+g}% ROI)" if socr is not None else ""))
     if stat:
         lines.append("\U0001f4b0 " + "  ·  ".join(stat))
 
@@ -1174,13 +1168,15 @@ def handle_trade(trade, label, wallet):
     if pkey in alerted_positions:   # already pinged this position -> suppress multi-fill/add double pings
         return
     alert_progress[pkey] = alert_progress.get(pkey, 0) + fill_size
+    alert_pxsum[pkey] = alert_pxsum.get(pkey, 0) + fill_size * (trade.get("price") or 0)
     if alert_progress[pkey] < WALLET_MIN_SIZE.get(wallet, MIN_SIZE):
         return
     accumulated = alert_progress.pop(pkey)
+    entry_vwap = alert_pxsum.pop(pkey, 0) / accumulated if accumulated else trade.get("price", 0)
     alerted_positions.add(pkey)
     if side == "BUY" and cid:
         alerted_markets[(wallet, cid)] = {"outcome": outcome, "title": title, "size": accumulated}
-    send_discord_alert(trade, label, wallet, gs, accumulated)
+    send_discord_alert(trade, label, wallet, gs, accumulated, entry_vwap)
 
 # --- Monitor loop ------------------------------------------------------------
 
