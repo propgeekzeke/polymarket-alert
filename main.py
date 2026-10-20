@@ -1,5 +1,6 @@
 """PolyAlert v2 - pre-game sharp tailing: tailability check, consensus, CLV scoreboard."""
 import os, re, time, threading, requests, statistics, json, fcntl, unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from flask import Flask, jsonify
 
@@ -29,7 +30,9 @@ WALLETS = {
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 DISCORD_USER_ID = "221025359884320770"
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
-POLL_INTERVAL = 20
+POLL_INTERVAL = 5
+EARLY_ALERT_FRAC = 0.5   # ping once a position reaches 50% of the wallet threshold, then live-edit the message as fills land
+EDIT_MIN_GAP = 8         # seconds between Discord message edits per position
 MIN_SIZE = 10000
 CONSENSUS_MIN = 1000     # any tracked-wallet pre-game BUY >= this counts toward consensus
 TAIL_OK_PP = 1.0         # current price within this of entry -> tailable
@@ -89,6 +92,7 @@ consensus_book = {}      # (eventSlug, outcome) -> {wallet: total USDC}
 consensus_alerted = set()  # (eventSlug, outcome) already alerted
 alert_progress = {}      # (wallet, eventSlug, outcome, side) -> USDC accumulated since last alert
 alert_pxsum = {}         # same key -> sum(USDC * price) for entry VWAP
+alert_msgs = {}          # same key -> {"id": discord msg id, "pin": devig dict, "last_edit": ts, "trade": first trade}
 clv_log = []             # alerted BUYs pending/graded vs closing line
 clv_baseline = {}        # wallet -> historical CLV stats (computed at startup, EV-style %)
 wallet_cards = {}        # wallet -> {avg_bet, all_pnl, all_roi, soc_pnl, soc_roi} for alerts
@@ -130,7 +134,7 @@ SPORT_MAP = [
 def get_recent_trades(wallet):
     try:
         r = requests.get("https://data-api.polymarket.com/activity",
-                         params={"user": wallet, "limit": 25}, timeout=10)
+                         params={"user": wallet, "limit": 100}, timeout=8)
         if not r.ok:
             return []
         d = r.json()
@@ -974,8 +978,22 @@ def price_to_american(price):
 
 
 def _post_discord(content):
+    """Post to the webhook; returns the Discord message id (so we can edit it later) or None."""
     try:
-        requests.post(DISCORD_WEBHOOK, json={
+        r = requests.post(DISCORD_WEBHOOK, params={"wait": "true"}, json={
+            "content": content,
+            "allowed_mentions": {"users": [DISCORD_USER_ID]}
+        }, timeout=5)
+        if r.ok:
+            return (r.json() or {}).get("id")
+    except Exception:
+        pass
+    return None
+
+
+def _edit_discord(msg_id, content):
+    try:
+        requests.patch(f"{DISCORD_WEBHOOK}/messages/{msg_id}", json={
             "content": content,
             "allowed_mentions": {"users": [DISCORD_USER_ID]}
         }, timeout=5)
@@ -992,32 +1010,24 @@ def _countdown(gs):
     return f"starts in {mins // 60}h {mins % 60:02d}m" if mins >= 60 else f"starts in {mins}m"
 
 
-def send_discord_alert(trade, label, wallet, gs, accumulated=None, entry_price=None):
+def build_alert_content(trade, label, wallet, gs, accumulated, price, pin, threshold=None):
     side       = trade.get("side", "")
     event_slug = trade.get("eventSlug", "")
     outcome    = trade.get("outcome", "")
     title      = trade.get("title", "")
-    fill_size  = trade.get("usdcSize", 0)
-    price      = entry_price or trade.get("price", 0)      # what THEY paid (VWAP of the fills that triggered this)
-    asset      = trade.get("asset", "")
-
-    if accumulated is None:
-        accumulated = fill_size
-    total = position_totals.get((wallet, event_slug, outcome), fill_size)
-
-    # Fair value vs the price they paid (power devig of Pinnacle via Optic, Odds API fallback)
-    pin     = get_optic_devig(event_slug, title, outcome, price, gs) or get_pinnacle_devig(event_slug, title, outcome, price)
+    total = position_totals.get((wallet, event_slug, outcome), accumulated)
     profile = wallet_profiles.get(wallet, {})
     my_clv  = clv_baseline.get(wallet) or clv_stats(wallet).get(wallet)
 
     emoji  = "\U0001f7e2" if side == "BUY" else "\U0001f534"
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
+    filling = "  \u23f3 *still filling*" if (threshold and accumulated < threshold) else ""
 
     avg_stake = profile.get("avg_stake") if profile else None
     if avg_stake:
-        bet_line = f"Bet **${accumulated:,.0f}**  ({accumulated / avg_stake:.1f}x their avg bet of ${avg_stake:,})"
+        bet_line = f"Bet **${accumulated:,.0f}**  ({accumulated / avg_stake:.1f}x their avg bet of ${avg_stake:,}){filling}"
     else:
-        bet_line = f"Bet **${accumulated:,.0f}**"
+        bet_line = f"Bet **${accumulated:,.0f}**{filling}"
     if total and abs(total) > accumulated * 1.05:
         bet_line += f"  |  position **${total:,.0f}**"
 
@@ -1057,7 +1067,26 @@ def send_discord_alert(trade, label, wallet, gs, accumulated=None, entry_price=N
         lines.append("\U0001f4b0 " + "  ·  ".join(stat))
 
     lines.append(f"<https://polymarket.com/@{wallet}>")
-    _post_discord("\n".join(lines))
+    return "\n".join(lines)
+
+
+def send_discord_alert(trade, label, wallet, gs, accumulated=None, entry_price=None, pkey=None, threshold=None):
+    side       = trade.get("side", "")
+    event_slug = trade.get("eventSlug", "")
+    outcome    = trade.get("outcome", "")
+    title      = trade.get("title", "")
+    fill_size  = trade.get("usdcSize", 0)
+    price      = entry_price or trade.get("price", 0)      # what THEY paid (VWAP of the fills so far)
+    asset      = trade.get("asset", "")
+    if accumulated is None:
+        accumulated = fill_size
+
+    # Fair value vs the price they paid (power devig of Pinnacle via Optic, Odds API fallback)
+    pin = get_optic_devig(event_slug, title, outcome, price, gs) or get_pinnacle_devig(event_slug, title, outcome, price)
+
+    msg_id = _post_discord(build_alert_content(trade, label, wallet, gs, accumulated, price, pin, threshold))
+    if pkey is not None:
+        alert_msgs[pkey] = {"id": msg_id, "pin": pin, "last_edit": time.time(), "trade": trade}
 
     if side == "BUY" and asset and gs:
         clv_log.append({"wallet": wallet, "label": label, "slug": event_slug,
@@ -1165,18 +1194,27 @@ def handle_trade(trade, label, wallet):
         return
 
     pkey = (wallet, event_slug, outcome, side)
-    if pkey in alerted_positions:   # already pinged this position -> suppress multi-fill/add double pings
-        return
     alert_progress[pkey] = alert_progress.get(pkey, 0) + fill_size
     alert_pxsum[pkey] = alert_pxsum.get(pkey, 0) + fill_size * (trade.get("price") or 0)
-    if alert_progress[pkey] < WALLET_MIN_SIZE.get(wallet, MIN_SIZE):
+    accumulated = alert_progress[pkey]
+    entry_vwap = alert_pxsum[pkey] / accumulated if accumulated else trade.get("price", 0)
+    threshold = WALLET_MIN_SIZE.get(wallet, MIN_SIZE)
+
+    if pkey in alerted_positions:
+        # Already pinged: keep the ORIGINAL message current (size / VWAP / +EV) instead of pinging again.
+        m = alert_msgs.get(pkey)
+        if m and m.get("id") and time.time() - m.get("last_edit", 0) >= EDIT_MIN_GAP:
+            m["last_edit"] = time.time()
+            if side == "BUY" and cid:
+                alerted_markets[(wallet, cid)] = {"outcome": outcome, "title": title, "size": accumulated}
+            _edit_discord(m["id"], build_alert_content(m["trade"], label, wallet, gs, accumulated, entry_vwap, m.get("pin"), threshold))
         return
-    accumulated = alert_progress.pop(pkey)
-    entry_vwap = alert_pxsum.pop(pkey, 0) / accumulated if accumulated else trade.get("price", 0)
+    if accumulated < EARLY_ALERT_FRAC * threshold:
+        return
     alerted_positions.add(pkey)
     if side == "BUY" and cid:
         alerted_markets[(wallet, cid)] = {"outcome": outcome, "title": title, "size": accumulated}
-    send_discord_alert(trade, label, wallet, gs, accumulated, entry_vwap)
+    send_discord_alert(trade, label, wallet, gs, accumulated, entry_vwap, pkey=pkey, threshold=threshold)
 
 # --- Monitor loop ------------------------------------------------------------
 
@@ -1202,9 +1240,12 @@ def monitor_loop():
     while True:
         try:
             time.sleep(POLL_INTERVAL)
-            for wallet, label in WALLETS.items():
+            # Fetch all wallets in parallel (one round-trip instead of 14 sequential ones), then process in order.
+            with ThreadPoolExecutor(max_workers=len(WALLETS) or 1) as ex:
+                fetched = list(ex.map(get_recent_trades, list(WALLETS.keys())))
+            for (wallet, label), trades in zip(WALLETS.items(), fetched):
                 try:
-                    for trade in reversed(get_recent_trades(wallet)):
+                    for trade in sorted(trades, key=lambda t: t.get("timestamp", 0)):
                         tx = trade.get("transactionHash", "")
                         ts = trade.get("timestamp", 0)
                         if not tx or tx in seen_hashes:
@@ -1230,6 +1271,8 @@ def monitor_loop():
                     g = game_starts.get(k[1])
                     if g and time.time() > g:
                         del alert_progress[k]
+                        alert_pxsum.pop(k, None)
+                        alert_msgs.pop(k, None)
                 for k in list(alerted_positions):
                     g = game_starts.get(k[1])
                     if g and time.time() > g:
