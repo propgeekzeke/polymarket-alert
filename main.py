@@ -65,6 +65,7 @@ _ESPORTS = ("lol-", "cs-", "cs2-", "val-", "dota-", "esports-", "r6-", "rl-")
 # Sport-name blocks (for sports without a fixed slug prefix, e.g. soccer)
 WALLET_BLOCK_SPORTS = {
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": ("Soccer",),   # #Bc43: soccer 45% beat
+    "0x924379a79c64b77ad5816ad362122a5f6228658e": ("Soccer",),   # #KchTemp: soccer -3.2% ROI on 112 bets (full on-chain history); NFL +32% / CFB +16% kept
 }
 
 WALLET_BLOCK = {
@@ -74,8 +75,8 @@ WALLET_BLOCK = {
     "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": _TENNIS + _ESPORTS + ("nhl-",),# #Sharp2a2C: edge is CBB+soccer; NHL/esports in-line, tennis -$1.69M
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": ("nfl-", "cfb-"),               # #Whale2c33: NFL 29% beat / -2.59% CLV, CFB 36% beat
     "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": _TENNIS + _ESPORTS + ("cfb-", "nfl-", "mlb-", "nba-", "wnba-", "cbb-", "ufc-"),  # #RoyaleStake: NHL only (CFB 43% beat)
-    "0x924379a79c64b77ad5816ad362122a5f6228658e": _TENNIS + _ESPORTS + ("ufc-",),                     # #KchTemp: tennis -1.05% CLV
-    "0xf0318c32136c2db7fec88b84869aee6a1106c80c": _TENNIS + _ESPORTS + ("nba-", "wnba-"),             # #BreakTheBank: NBA -1.60% CLV
+    "0x924379a79c64b77ad5816ad362122a5f6228658e": _TENNIS + _ESPORTS + ("ufc-",),                     # #KchTemp: tennis -2.8% ROI; soccer blocked via WALLET_BLOCK_SPORTS (-3.2% ROI, n=112)
+    "0xf0318c32136c2db7fec88b84869aee6a1106c80c": _TENNIS + _ESPORTS + ("nba-", "wnba-", "mlb-"),     # #BreakTheBank: NBA -10% ROI, MLB -41% ROI (n=41), tennis -11%; NFL +27%, soccer kept (+2.9%)
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": _TENNIS + _ESPORTS + ("nhl-", "ufc-", "cfb-", "cbb-"),  # #Bc43: NFL/NBA/MLB only (soccer handled below)
     "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": _TENNIS + _ESPORTS,                               # #VeryLucky888: esports 25% beat
 }
