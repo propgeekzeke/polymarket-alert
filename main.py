@@ -24,7 +24,6 @@ WALLETS = {
     "0x924379a79c64b77ad5816ad362122a5f6228658e": "#KchTemp",          # 68% beat, +1.13% CLV (n=236, 0% live); NFL 78%/n55; $2.51M, avg $47k
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BreakTheBank",     # 71% beat, +1.91% CLV (n=119); soccer +4.18%/71%, NFL 69%; $5.08M, avg $28k
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": "#Bc43",             # NFL 68%/n63, NBA 74%/n31; soccer/NHL blocked; +$1.19M 30d - TRIAL
-    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": "#VeryLucky888",     # 67% beat, +0.99% CLV (n=176, 0% live); CFB 71%, NFL 76%, soccer 65%; $894k
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -55,7 +54,6 @@ WALLET_MIN_SIZE = {
     "0x924379a79c64b77ad5816ad362122a5f6228658e": 38000,  # #KchTemp (avg $47k; his >=80% bets beat close 74%)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 22000,  # #BreakTheBank (avg $28k)
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": 8000,   # #Bc43 (NFL avg $25k, NBA $3k)
-    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": 4000,   # #VeryLucky888 (avg $3k; >=80%-of-avg bets beat close 69% - filter the inventory noise)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
@@ -78,7 +76,6 @@ WALLET_BLOCK = {
     "0x924379a79c64b77ad5816ad362122a5f6228658e": _TENNIS + _ESPORTS + ("ufc-",),                     # #KchTemp: tennis -2.8% ROI; soccer blocked via WALLET_BLOCK_SPORTS (-3.2% ROI, n=112)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": _TENNIS + _ESPORTS + ("nba-", "wnba-", "mlb-"),     # #BreakTheBank: NBA -10% ROI, MLB -41% ROI (n=41), tennis -11%; NFL +27%, soccer kept (+2.9%)
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": _TENNIS + _ESPORTS + ("nhl-", "ufc-", "cfb-", "cbb-"),  # #Bc43: NFL/NBA/MLB only (soccer handled below)
-    "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": _TENNIS + _ESPORTS,                               # #VeryLucky888: esports 25% beat
 }
 
 # --- Runtime state -----------------------------------------------------------
@@ -450,13 +447,15 @@ def get_pinnacle_devig(event_slug, title, outcome, pm_price):
         if fair_prob is None and outcome_lower in ("yes", "no"):
             # "Will X win?" -> find X among outcomes by title overlap
             best_team_prob, best_team_score = None, 0
-            for name, prob in fair.items():
+            if "draw" in title_lower and "draw" in fair:
+                fair_prob = fair["draw"] if outcome_lower == "yes" else 1.0 - fair["draw"]
+            for name, prob in (fair.items() if fair_prob is None else []):
                 if name == "draw":
                     continue
                 score = len(title_words & (set(name.replace("-", " ").split()) - STOP))
                 if score > best_team_score:
                     best_team_score, best_team_prob = score, prob
-            if best_team_prob is not None and best_team_score > 0:
+            if fair_prob is None and best_team_prob is not None and best_team_score > 0:
                 fair_prob = best_team_prob if outcome_lower == "yes" else 1.0 - best_team_prob
 
         if fair_prob is None:
@@ -620,7 +619,10 @@ def get_optic_devig(event_slug, title, outcome, pm_price, gs):
             mw = _words(title_lower)
             acr = [a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", title or "")]
             bn, bs = None, 0
-            for k in fair:
+            if "draw" in title_lower and "draw" in fair:
+                # "Will X vs Y end in a draw?" -> Yes = draw prob, No = 1 - draw
+                fair_prob = fair["draw"] if outcome_lower == "yes" else 1.0 - fair["draw"]
+            for k in (fair if fair_prob is None else []):
                 if k == "draw":
                     continue
                 kw = _words(k)
@@ -630,7 +632,7 @@ def get_optic_devig(event_slug, title, outcome, pm_price, gs):
                     sc += 1
                 if sc > bs:
                     bs, bn = sc, k
-            if bn is not None and bs > 0:
+            if fair_prob is None and bn is not None and bs > 0:
                 fair_prob = fair[bn] if outcome_lower == "yes" else 1.0 - fair[bn]
         else:
             ow = _words(outcome_lower)
