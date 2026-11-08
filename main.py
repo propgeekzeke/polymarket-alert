@@ -129,16 +129,61 @@ SPORT_MAP = [
 
 # --- Polymarket API ----------------------------------------------------------
 
-def get_recent_trades(wallet):
-    try:
-        r = requests.get("https://data-api.polymarket.com/activity",
-                         params={"user": wallet, "limit": 100}, timeout=8)
+# Data API v1 was retired 2026-10-24. v2 wraps rows in {"data": ..., "pagination": {...}}, pages by cursor
+# and uses snake_case. _dapi() calls v2 and hands back v1-shaped (camelCase) rows so the rest of the code is unchanged.
+DAPI = "https://data-api.polymarket.com/v2/"
+_V1_KEYS = {"proxy_wallet": "proxyWallet", "condition_id": "conditionId", "usdc_size": "usdcSize",
+            "transaction_hash": "transactionHash", "token_id": "asset", "outcome_index": "outcomeIndex",
+            "event_slug": "eventSlug", "avg_price": "avgPrice", "current_price": "curPrice",
+            "current_value": "currentValue", "realized_pnl": "realizedPnl", "total_pnl": "cashPnl",
+            "percent_pnl": "percentPnl", "end_date": "endDate", "entry_cost_usdc": "initialValue",
+            "total_size": "totalBought", "profile_image": "profileImage"}
+
+
+def _v1row(x):
+    if not isinstance(x, dict):
+        return x
+    d = dict(x)
+    for k, v in _V1_KEYS.items():
+        if k in x and v not in d:
+            d[v] = x[k]
+    return d
+
+
+def _dapi(path, params, max_rows=None, timeout=15):
+    """GET a Data API v2 route, follow cursors up to max_rows, return a list of v1-shaped rows ([] on failure)."""
+    p0 = {k: v for k, v in params.items() if k != "offset" and v is not None}
+    if "market" in p0:
+        p0["condition"] = p0.pop("market")
+    out, cursor, tries = [], None, 0
+    while True:
+        p = dict(p0)
+        if cursor:
+            p["cursor"] = cursor
+        try:
+            r = requests.get(DAPI + path, params=p, timeout=timeout)
+        except Exception:
+            break
+        if r.status_code == 429 and tries < 3:
+            tries += 1
+            time.sleep(min(float(r.headers.get("Retry-After", 2) or 2), 10))
+            continue
         if not r.ok:
-            return []
-        d = r.json()
-        return d if isinstance(d, list) else []
-    except Exception:
-        return []
+            print(f"Data API v2 {path} -> HTTP {r.status_code}: {r.text[:120]}", flush=True)
+            break
+        j = r.json() or {}
+        rows = j.get("data") or []
+        if isinstance(rows, dict):
+            return rows
+        out.extend(_v1row(x) for x in rows)
+        cursor = (j.get("pagination") or {}).get("next_cursor")
+        if not cursor or not rows or (max_rows and len(out) >= max_rows):
+            break
+    return out[:max_rows] if max_rows else out
+
+
+def get_recent_trades(wallet):
+    return _dapi("activity", {"user": wallet, "limit": 100}, max_rows=100, timeout=8)
 
 
 def get_game_start(event_slug):
@@ -199,21 +244,7 @@ def get_closing_price(token_id, gs):
 def fetch_wallet_profile(wallet):
     """Paginate through ALL activity records for a wallet and compute summary stats."""
     try:
-        raw = []
-        offset = 0
-        while offset < 6000:
-            r = requests.get("https://data-api.polymarket.com/activity",
-                             params={"user": wallet, "limit": 500, "offset": offset},
-                             timeout=15)
-            if not r.ok:
-                break
-            batch = r.json()
-            if not isinstance(batch, list) or not batch:
-                break
-            raw.extend(batch)
-            if len(batch) < 500:
-                break
-            offset += 500
+        raw = _dapi("activity", {"user": wallet, "limit": 1000}, max_rows=6000)
         if not raw:
             return {}
 
@@ -305,11 +336,7 @@ def get_market_p90(condition_id, fill_size):
     if not condition_id:
         return None, None
     try:
-        r = requests.get("https://data-api.polymarket.com/trades",
-                         params={"market": condition_id, "limit": 200}, timeout=10)
-        if not r.ok:
-            return None, None
-        trades = r.json()
+        trades = _dapi("trades", {"condition": condition_id, "limit": 200}, max_rows=200, timeout=10)
         if not isinstance(trades, list):
             return None, None
         sizes = sorted([t.get("size", 0) * t.get("price", 0) for t in trades
@@ -730,23 +757,7 @@ def clv_stats(wallet=None):
 
 def compute_historical_clv(wallet, max_events=40):
     """One-time baseline: EV-style CLV over a wallet's recent pre-game $1k+ sport bets."""
-    raw, offset = [], 0
-    while offset < 4000:
-        try:
-            r = requests.get("https://data-api.polymarket.com/activity",
-                             params={"user": wallet, "limit": 500, "offset": offset,
-                                     "type": "TRADE"}, timeout=15)
-            if not r.ok:
-                break
-            b = r.json()
-        except Exception:
-            break
-        if not isinstance(b, list) or not b:
-            break
-        raw.extend(b)
-        if len(b) < 500:
-            break
-        offset += 500
+    raw = _dapi("activity", {"user": wallet, "limit": 1000, "type": "TRADE"}, max_rows=4000)
     samples = {}
     for t in raw:
         if t.get("side") != "BUY" or t.get("usdcSize", 0) < 1000:
@@ -798,30 +809,20 @@ def _sport_of(slug):
 
 def compute_sport_stats(wallet, per_sport=400, max_positions=9000):
     """Per-sport realized P&L/ROI over closed positions + pre-game CLV on that sport's biggest $1k+ bets."""
-    closed, seen, offset = [], set(), 0
-    while offset < max_positions:
-        try:
-            b = requests.get("https://data-api.polymarket.com/closed-positions",
-                             params={"user": wallet, "limit": 50, "offset": offset,
-                                     "sortBy": "TIMESTAMP", "sortDirection": "DESC"}, timeout=15).json()
-        except Exception:
-            break
-        if not isinstance(b, list) or not b:
-            break
-        new = 0
-        for p in b:
+    closed, seen = [], set()
+    for status in ("CLOSED", "REDEEMABLE"):   # v2 also exposes unredeemed winners AND losers -> no survivorship bias
+        for p in _dapi("positions", {"user": wallet, "status": status, "limit": 1000,
+                                     "sort_by": "TIMESTAMP", "sort_direction": "DESC"}, max_rows=max_positions):
             k = (p.get("asset"), p.get("conditionId"))
             if k not in seen:
-                seen.add(k); closed.append(p); new += 1
-        if not new or len(b) < 50:
-            break
-        offset += 50
+                seen.add(k); closed.append(p)
     by = {}
     for p in closed:
         sp = _sport_of(p.get("eventSlug") or p.get("slug"))
-        cost = (p.get("totalBought") or 0) * (p.get("avgPrice") or 0)
+        cost = p.get("total_cost_usdc") or (p.get("totalBought") or 0) * (p.get("avgPrice") or 0)
+        pnl = p.get("total_pnl") if p.get("total_pnl") is not None else (p.get("realizedPnl") or 0)
         d = by.setdefault(sp, {"cost": 0.0, "pnl": 0.0, "n": 0, "big": []})
-        d["cost"] += cost; d["pnl"] += (p.get("realizedPnl") or 0); d["n"] += 1
+        d["cost"] += cost; d["pnl"] += pnl; d["n"] += 1
         if cost >= 500:
             d["big"].append((cost, p))
     out = {}
@@ -834,12 +835,8 @@ def compute_sport_stats(wallet, per_sport=400, max_positions=9000):
             gs = get_game_start(slug)
             if not gs:
                 continue
-            try:
-                tr = requests.get("https://data-api.polymarket.com/trades",
-                                  params={"user": wallet, "market": p.get("conditionId"), "limit": 300},
-                                  timeout=15).json()
-            except Exception:
-                continue
+            tr = _dapi("trades", {"user": wallet, "condition": p.get("conditionId"), "limit": 300,
+                                  "taker_only": "false"}, max_rows=300)
             if not isinstance(tr, list):
                 continue
             pre = [t for t in tr if isinstance(t, dict) and t.get("side") == "BUY"
@@ -880,19 +877,7 @@ def compute_wallet_card(wallet):
     """Startup stats for alerts: avg bet, all-time + soccer P&L/ROI (mark-to-market)."""
     SOC = ("fifwc", "epl-", "lal-", "ucl-", "sea-", "bun-", "li1-", "mls-", "uel-",
            "world-cup", "copa", "champions")
-    raw, offset = [], 0
-    while offset < 6000:
-        try:
-            b = requests.get("https://data-api.polymarket.com/activity",
-                             params={"user": wallet, "limit": 500, "offset": offset}, timeout=15).json()
-        except Exception:
-            break
-        if not isinstance(b, list) or not b:
-            break
-        raw.extend(b)
-        if len(b) < 500:
-            break
-        offset += 500
+    raw = _dapi("activity", {"user": wallet, "limit": 1000}, max_rows=6000)
     cost = soc_cost = soc_proc = 0.0
     stakes = {}
     for t in raw:
@@ -913,8 +898,7 @@ def compute_wallet_card(wallet):
                 soc_proc += u
     openval = 0.0
     try:
-        p = requests.get("https://data-api.polymarket.com/positions",
-                         params={"user": wallet, "limit": 500}, timeout=15).json()
+        p = _dapi("positions", {"user": wallet, "limit": 500}, max_rows=500)
         for x in p if isinstance(p, list) else []:
             s = (x.get("eventSlug", "") or x.get("slug", "")).lower()
             if any(k in s for k in SOC):
@@ -1461,12 +1445,12 @@ def get_official_pnl(wallet):
         return c[1]
     out = {}
     try:
-        d = requests.get("https://user-pnl-api.polymarket.com/user-pnl",
-                         params={"user_address": wallet, "interval": "all", "fidelity": "1d"},
-                         timeout=10).json()
-        if isinstance(d, list) and d:
-            out = {"all": round(d[-1]["p"]),
-                   "d30": round(d[-1]["p"] - d[-31]["p"]) if len(d) > 31 else round(d[-1]["p"])}
+        r = requests.get(DAPI + "user-pnl", params={"user": wallet, "interval": "all", "fidelity": "1d"}, timeout=10)
+        pts = (((r.json() or {}).get("data") or {}).get("points") or []) if r.ok else []
+        v = [x.get("position_pnl") if x.get("position_pnl") is not None else (x.get("realized_pnl") or 0) + (x.get("unrealized_pnl") or 0)
+             for x in pts]
+        if v:
+            out = {"all": round(v[-1]), "d30": round(v[-1] - v[-31]) if len(v) > 31 else round(v[-1])}
     except Exception:
         pass
     _official_pnl_cache[wallet] = (now, out)
@@ -1475,9 +1459,8 @@ def get_official_pnl(wallet):
 
 def get_open_positions(wallet):
     try:
-        d = requests.get("https://data-api.polymarket.com/positions",
-                         params={"user": wallet, "sortBy": "CURRENT",
-                                 "sortDirection": "DESC", "limit": 500}, timeout=15).json()
+        d = _dapi("positions", {"user": wallet, "sort_by": "CURRENT_VALUE", "sort_direction": "DESC", "limit": 500},
+                  max_rows=500)
     except Exception:
         return []
     out = []
