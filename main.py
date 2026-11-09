@@ -1057,7 +1057,7 @@ def replay_pings(days=30):
         gs = g["m"].get(t.get("conditionId")) or g["gs"]
         base = {"ts": ts, "ev": ev, "out": out, "title": t.get("title"), "tok": t.get("asset"),
                 "cond": t.get("conditionId"), "px": px, "gs": gs, "sport": _sport_of(ev)}
-        k = (w, ev, out)
+        k = (w, ev, f"{out}@{t.get('conditionId') or ''}")
         prog[k] = prog.get(k, 0) + usd
         if k not in done:
             if prog[k] >= EARLY_ALERT_FRAC * WALLET_MIN_SIZE.get(w, MIN_SIZE):
@@ -1407,7 +1407,7 @@ def build_alert_content(trade, label, wallet, gs, accumulated, price, pin, thres
     event_slug = trade.get("eventSlug", "")
     outcome    = trade.get("outcome", "")
     title      = trade.get("title", "")
-    total = position_totals.get((wallet, event_slug, outcome), accumulated)
+    total = position_totals.get((wallet, event_slug, f"{outcome}@{trade.get('conditionId') or ''}"), accumulated)
     profile = wallet_profiles.get(wallet, {})
     my_clv  = clv_baseline.get(wallet) or clv_stats(wallet).get(wallet)
 
@@ -1630,7 +1630,10 @@ def handle_trade(trade, label, wallet):
     if gs and ts >= gs:
         return
 
-    key = (wallet, event_slug, outcome)
+    # Positions are tracked per MARKET: "Suns" on the moneyline and "Suns +8.5" are different bets (bug fix 2026-11-09:
+    # they used to be summed under one event-level key and shown under whichever market's title came first).
+    mk = f"{outcome}@{trade.get('conditionId') or ''}"
+    key = (wallet, event_slug, mk)
     position_totals[key] = position_totals.get(key, 0) + (fill_size if side == "BUY" else -fill_size)
 
     # Consensus: keyed by MARKET (conditionId), not event - "Eagles" on the ML and "Eagles" on a spread are
@@ -1665,7 +1668,7 @@ def handle_trade(trade, label, wallet):
                 send_hedge_alert(label, wallet, title, orig, outcome, hedge_progress[hk], trade.get("price", 0), gs)
         return
 
-    pkey = (wallet, event_slug, outcome, side)
+    pkey = (wallet, event_slug, mk, side)
     alert_progress[pkey] = alert_progress.get(pkey, 0) + fill_size
     alert_pxsum[pkey] = alert_pxsum.get(pkey, 0) + fill_size * (trade.get("price") or 0)
     accumulated = alert_progress[pkey]
@@ -1711,8 +1714,62 @@ def handle_trade(trade, label, wallet):
 
 # --- Monitor loop ------------------------------------------------------------
 
+def seed_open_positions():
+    """Rebuild in-memory position / consensus state from each wallet's OPEN positions so a restart or redeploy doesn't
+    forget who is already on what (bug fix 2026-11-09: a 17:07Z redeploy wiped KchTemp's Over 44.5, so Bc43's later bet
+    on the same market never triggered consensus). Positions already past the ping size are marked as pinged (silent)."""
+    now = time.time(); n_pos = n_pinged = 0
+    cands = []
+
+    def pull(w):
+        return w, _dapi("positions", {"user": w, "limit": 500}, max_rows=1500)
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        pulled = list(ex.map(pull, [w for w in WALLETS if w not in WATCH_WALLETS]))
+    for w, rows in pulled:
+        floor = min(1000, 0.25 * WALLET_MIN_SIZE.get(w, MIN_SIZE))
+        for p in rows:
+            ev, title, out = p.get("eventSlug") or "", p.get("title") or "", p.get("outcome") or ""
+            cost = (p.get("totalBought") or 0) * (p.get("avgPrice") or 0)
+            if ev and out and cost >= floor and _passes_filters(w, ev, title):
+                cands.append((w, p, cost))
+    need = {p.get("eventSlug") for _, p, _ in cands if p.get("eventSlug") not in game_starts}
+    for ev, g in _gamma_event_starts(need, workers=8).items():
+        game_starts[ev] = g["gs"]
+    for w, p, cost in cands:
+        thr = WALLET_MIN_SIZE.get(w, MIN_SIZE)
+        ev, title, out, cid = p.get("eventSlug") or "", p.get("title") or "", p.get("outcome") or "", p.get("conditionId") or ""
+        gs = game_starts.get(ev)
+        if not gs or gs <= now:
+            continue
+        avg = p.get("avgPrice") or 0
+        mk = f"{out}@{cid}"
+        position_totals[(w, ev, mk)] = cost
+        ck = (cid or ev, out)
+        consensus_book.setdefault(ck, {})[w] = cost
+        consensus_px.setdefault(ck, {})[w] = cost * avg
+        pkey = (w, ev, mk, "BUY")
+        alert_progress[pkey] = cost; alert_pxsum[pkey] = cost * avg
+        n_pos += 1
+        if cost >= EARLY_ALERT_FRAC * thr:
+            alerted_positions.add(pkey); n_pinged += 1
+            u = units_for(w, cost)
+            alert_tier[pkey] = 0 if u == 0 else (2 if u >= SIZE_CAP else 1)
+            alert_units[pkey] = u
+            if cid:
+                alerted_markets[(w, cid)] = {"outcome": out, "title": title, "size": cost}
+    for ck, book in consensus_book.items():
+        q = [w for w, a in book.items() if a >= max(CONSENSUS_MIN, 0.25 * WALLET_MIN_SIZE.get(w, MIN_SIZE))]
+        if len(q) >= 2:
+            consensus_alerted.add(ck)   # already pinged before the restart
+    print(f"Seeded {n_pos} open pre-game positions ({n_pinged} already past ping size) across {len(WALLETS)} wallets", flush=True)
+
+
 def monitor_loop():
     print(f"Monitor thread running in pid={os.getpid()}", flush=True)
+    try:
+        seed_open_positions()
+    except Exception as e:
+        print(f"Seed open positions error: {e}", flush=True)
     for wallet, label in WALLETS.items():
         try:
             if wallet not in clv_baseline:
