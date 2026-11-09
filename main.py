@@ -29,6 +29,11 @@ ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 POLL_INTERVAL = 5
 EARLY_ALERT_FRAC = 0.5   # ping once a position reaches 50% of the wallet threshold, then live-edit the message as fills land
 EDIT_MIN_GAP = 8         # seconds between Discord message edits per position
+# Your sizing (backtest Oct 9-Nov 9: skip <1x avg, then 1u per 1x avg, cap 2u = +6.0% ROI vs +3.2% flat)
+UNIT       = 1000        # 1u = to-win $1k on favorites (>50c), risk $1k on dogs
+SIZE_CAP   = 2.0         # max units
+# Watch-only: still graded in the weekly self-grade, but never pinged (incl. consensus)
+WATCH_WALLETS = {"0x076daa87c4fe1a85402a9b6b8e0a866224388d4c"}   # #Sharp076d: watch until ~Dec 9 (30d CLV/ROI slump)
 MIN_SIZE = 10000
 CONSENSUS_MIN = 1000     # any tracked-wallet pre-game BUY >= this counts toward consensus
 TAIL_OK_PP = 1.0         # current price within this of entry -> tailable
@@ -1037,7 +1042,7 @@ def replay_pings(days=30):
         for t in rows:
             events.append((t.get("timestamp") or 0, w, t))
     events.sort(key=lambda x: x[0])
-    prog, done = {}, set()
+    prog, done, pidx = {}, set(), {}
     for ts, w, t in events:
         ev = t["eventSlug"]; g = G.get(ev)
         if g is None:
@@ -1049,11 +1054,23 @@ def replay_pings(days=30):
         base = {"ts": ts, "ev": ev, "out": out, "title": t.get("title"), "tok": t.get("asset"),
                 "cond": t.get("conditionId"), "px": px, "gs": gs, "sport": _sport_of(ev)}
         k = (w, ev, out)
+        prog[k] = prog.get(k, 0) + usd
         if k not in done:
-            prog[k] = prog.get(k, 0) + usd
             if prog[k] >= EARLY_ALERT_FRAC * WALLET_MIN_SIZE.get(w, MIN_SIZE):
                 done.add(k)
-                pings.append(dict(base, kind="wallet", wallet=w, label=WALLETS[w]))
+                pings.append(dict(base, kind="watch" if w in WATCH_WALLETS else "wallet", wallet=w,
+                                  label=WALLETS[w], legs=[], placed=0.0, nextr=0.0))
+                pidx[k] = pings[-1]
+        if k in pidx and t.get("asset") == pidx[k]["tok"]:
+            # your scale-in: re-size each time he crosses another 0.5x of his average bet
+            pg = pidx[k]; r = prog[k] / avg_bet(w)
+            if r + 1e-9 >= pg["nextr"]:
+                tgt = units_for(w, prog[k])
+                if tgt > pg["placed"] + 1e-9:
+                    pg["legs"].append({"px": px, "u": tgt - pg["placed"]}); pg["placed"] = tgt
+                pg["nextr"] = int(r / 0.5) * 0.5 + 0.5
+        if w in WATCH_WALLETS:
+            continue
         ck = (t.get("conditionId"), out)
         b = cbook.setdefault(ck, {})
         b[w] = b.get(w, 0) + usd
@@ -1069,10 +1086,34 @@ def replay_pings(days=30):
         p["close"] = cl.get(p["tok"])
         p["clv"] = (p["close"] / e - 1) * 100 if (p["close"] and 0.02 < e < 0.98) else None
         p["risk"], p["pnl"] = _tail_bet(e, fin.get(p["tok"])) if 0.02 < e < 0.98 else (0, None)
+        # sized (your scale): sum of legs, each at the price when he crossed that size
+        f = fin.get(p["tok"]); rs = ps = 0.0
+        for lg in p.pop("legs", None) or []:
+            if 0.02 < lg["px"] < 0.98:
+                rk, _ = bet_dollars(lg["u"], lg["px"])
+                rs += rk
+                if f is not None:
+                    ps += rk * (f / lg["px"] - 1)
+        p["units"] = p.pop("placed", 0); p.pop("nextr", None)
+        p["risk_s"], p["pnl_s"] = rs, (ps if f is not None else None)
+    # consensus pings: you bet the size of the biggest wallet on it (same scale-in legs)
+    by_tok = {}
+    for p in pings:
+        if p["kind"] == "wallet":
+            by_tok.setdefault((p["tok"], p["wallet"]), p)
+    for p in pings:
+        if p["kind"] == "consensus":
+            cands = [by_tok.get((p["tok"], w)) for w in p["wallet"].split(",")]
+            cands = [c for c in cands if c and c.get("risk_s")]
+            best = max(cands, key=lambda c: c["risk_s"]) if cands else None
+            p["risk_s"], p["pnl_s"] = (best["risk_s"], best["pnl_s"]) if best else (0.0, None)
     return pings
 
 
 def _tail_summary(rows):
+    z = [x for x in rows if x.get("pnl_s") is not None and x.get("risk_s")]
+    rz = sum(x["risk_s"] for x in z); pz = sum(x["pnl_s"] for x in z)
+    sized = {"bets": len(z), "risked": round(rz), "pnl": round(pz), "roi": round(100 * pz / rz, 1) if rz else None}
     s = [x for x in rows if x.get("pnl") is not None]
     c = [x["clv"] for x in rows if x.get("clv") is not None]
     risk = sum(x["risk"] for x in s); pnl = sum(x["pnl"] for x in s)
@@ -1080,15 +1121,18 @@ def _tail_summary(rows):
             "roi": round(100 * pnl / risk, 1) if risk else None,
             "clv": round(sum(c) / len(c), 2) if c else None,
             "clv_med": round(statistics.median(c), 2) if c else None,
-            "beat": round(100 * sum(1 for y in c if y > 0) / len(c)) if c else None}
+            "beat": round(100 * sum(1 for y in c if y > 0) / len(c)) if c else None, "sized": sized}
 
 
 def _fmt_tail(lab, s, width=16):
     if not s["graded"]:
         return f"`{lab:<{width}}` {s['pings']} pings, none settled yet"
-    roi = f"{s['roi']:+.1f}%" if s["roi"] is not None else "n/a"
-    clv = f"CLV med {s['clv_med']:+.2f}% (avg {s['clv']:+.2f}%) · beat {s['beat']}%" if s["clv"] is not None else ""
-    return f"`{lab:<{width}}` {s['graded']:>3} bets · **${s['pnl']:+,}** · ROI **{roi}** · {clv}"
+    z = s.get("sized") or {}
+    sz = (f"your size: {z['bets']} bets **${z['pnl']:+,}** ROI **{z['roi']:+.1f}%**" if z.get("roi") is not None
+          else "your size: no bets (never reached avg)")
+    flat = f"flat 1u: {s['graded']} · ${s['pnl']:+,} · {s['roi']:+.1f}%" if s["roi"] is not None else ""
+    clv = f"CLV med {s['clv_med']:+.2f}% · beat {s['beat']}%" if s["clv"] is not None else ""
+    return f"`{lab:<{width}}` {sz} \u00b7 _{flat}_ \u00b7 {clv}"
 
 
 def run_selfgrade(post=True, days=30):
@@ -1100,14 +1144,15 @@ def run_selfgrade(post=True, days=30):
         t0 = time.time()
         pings = replay_pings(days)
         wp = [p for p in pings if p["kind"] == "wallet"]
+        wl = [p for p in pings if p["kind"] == "watch"]
         cp = [p for p in pings if p["kind"] == "consensus"]
         per = []
         for w, label in WALLETS.items():
-            mine = [p for p in wp if p["wallet"] == w]
+            mine = [p for p in (wl if w in WATCH_WALLETS else wp) if p["wallet"] == w]
             s = _tail_summary(mine)
             o = get_official_pnl(w)
             flag = (s["clv"] is not None and s["graded"] >= GRADE_FLAG_N and (s["beat"] < GRADE_FLAG_BEAT or s["clv_med"] < 0))
-            per.append({"label": label, "wallet": w, "tail": s, "lifetime": o.get("all"), "d30": o.get("d30"), "flag": flag,
+            per.append({"label": label + (" (watch)" if w in WATCH_WALLETS else ""), "wallet": w, "tail": s, "lifetime": o.get("all"), "d30": o.get("d30"), "flag": flag,
                         "sports": {sp: _tail_summary([p for p in mine if p["sport"] == sp])
                                    for sp in sorted({p["sport"] for p in mine})}})
         per.sort(key=lambda r: -(r["tail"]["pnl"] or 0))
@@ -1119,7 +1164,7 @@ def run_selfgrade(post=True, days=30):
         if post:
             L = [f"<@{DISCORD_USER_ID}>",
                  f"# \U0001f4cb Weekly self-grade — last {days} days",
-                 "_Every ping the bot sent (replayed from the wallets' fills), bet at the ping price: risk $1k on dogs, to-win $1k on favorites._",
+                 f"_Every ping (replayed from the wallets' fills). **Your size** = skip until he's at his avg bet, then 1u per 1x avg (cap {SIZE_CAP:g}u), each add at the price when he got there; 1u = to-win ${UNIT:,} on favs / risk ${UNIT:,} on dogs. Flat = 1u at the ping price. Watch wallets aren't pinged or counted in ALL._",
                  _fmt_tail("ALL PINGS", res["all"]),
                  _fmt_tail("\U0001f6a8 CONSENSUS", res["consensus"]),
                  ""]
@@ -1129,7 +1174,9 @@ def run_selfgrade(post=True, days=30):
                 for sp, s in r["sports"].items():
                     if s["graded"] >= 5 and len(r["sports"]) > 1 and sp != "Other":
                         c = f" · CLV med {s['clv_med']:+.2f}% · beat {s['beat']}%" if s["clv"] is not None else ""
-                        L.append(f"   ↳ {sp}: {s['graded']} · ROI {s['roi']:+.1f}%{c}")
+                        z = s.get("sized") or {}
+                        zs = f"your size {z['bets']} · ROI {z['roi']:+.1f}%" if z.get("roi") is not None else "your size: no bets"
+                        L.append(f"   ↳ {sp}: {zs} · _flat {s['graded']} · {s['roi']:+.1f}%_{c}")
             fl = [r["label"] for r in per if r["flag"]]
             L.append("")
             L.append(f"⚠️ **Review:** {', '.join(fl)} (beat close < {GRADE_FLAG_BEAT}% or median CLV < 0 over {GRADE_FLAG_N}+ pings)" if fl
@@ -1364,11 +1411,7 @@ def build_alert_content(trade, label, wallet, gs, accumulated, price, pin, thres
     action = "NEW BET" if side == "BUY" else "CLOSED POSITION"
     filling = "  \u23f3 *still filling*" if (threshold and accumulated < threshold) else ""
 
-    avg_stake = profile.get("avg_stake") if profile else None
-    if avg_stake:
-        bet_line = f"Bet **${accumulated:,.0f}**  ({accumulated / avg_stake:.1f}x their avg bet of ${avg_stake:,}){filling}"
-    else:
-        bet_line = f"Bet **${accumulated:,.0f}**{filling}"
+    bet_line = f"He bet **${accumulated:,.0f}**  ({accumulated / avg_bet(wallet):.1f}x his avg bet of ${avg_bet(wallet):,.0f}){filling}"
     if total and abs(total) > accumulated * 1.05:
         bet_line += f"  |  position **${total:,.0f}**"
 
@@ -1379,6 +1422,8 @@ def build_alert_content(trade, label, wallet, gs, accumulated, price, pin, thres
         f"{side} **{outcome}** @ **{round(price*100,1)}c**  ({price_to_american(price)})",
         bet_line,
     ]
+    if side == "BUY":
+        lines.append(sizing_line(wallet, accumulated, price))
 
     if pin:
         plus_ev = price <= pin["fair"]
@@ -1478,6 +1523,12 @@ def build_consensus_content(event_slug, outcome, title, book, ckey, pin):
                if ss.get("n") and ss.get("beat_close_pct") is not None else "")
         lines.append(f"• **{WALLETS.get(w, w[:8])}** ${book[w]:,.0f} @ {avg * 100:.1f}c{rec}")
     lines.append(f"Combined **${total:,.0f}**")
+    lead = max(book, key=lambda w: units_for(w, book[w]))
+    bp = now_price if now_price is not None else ((pxb.get(lead, 0) / book[lead]) if book.get(lead) else 0)
+    if units_for(lead, book[lead]) > 0 and bp:
+        lines.append(sizing_line(lead, book[lead], bp).replace("he's at", f"{WALLETS.get(lead, lead[:8])} is at"))
+    else:
+        lines.append("\U0001f4b5 **Your bet: WAIT** — no wallet is at its average bet yet; you'll get a BET NOW ping from whoever gets there first.")
     ref = now_price
     if pin:
         if ref is None:
@@ -1504,6 +1555,43 @@ def send_consensus_alert(event_slug, outcome, title, book, trade, ckey=None):
 
 # --- Trade handling ----------------------------------------------------------
 
+def avg_bet(wallet):
+    """Average conviction bet: thresholds are set at 80% of each wallet's average bet."""
+    return WALLET_MIN_SIZE.get(wallet, MIN_SIZE) / 0.8
+
+
+def units_for(wallet, size):
+    """Skip until he's at his average bet, then 1u per 1x average, capped at SIZE_CAP (rounded to 0.1u)."""
+    r = size / avg_bet(wallet)
+    return 0.0 if r < 1 else round(min(r, SIZE_CAP), 1)
+
+
+def bet_dollars(units, price):
+    """(risk, to_win) for `units` at `price`: favorites -> to-win units*UNIT; dogs -> risk units*UNIT."""
+    if not 0 < price < 1 or units <= 0:
+        return 0, 0
+    if price > 0.5:
+        win = units * UNIT
+        return win * price / (1 - price), win
+    risk = units * UNIT
+    return risk, risk * (1 - price) / price
+
+
+def sizing_line(wallet, size, price):
+    a = avg_bet(wallet); r = size / a; u = units_for(wallet, size)
+    if u == 0:
+        return (f"\U0001f4b5 **Your bet: WAIT** — he's at {r:.1f}x his avg (${size:,.0f} of ${a:,.0f}). "
+                f"You'll get a BET NOW ping when he hits ${a:,.0f}.")
+    risk, win = bet_dollars(u, price)
+    tail = "  ·  **max size**" if u >= SIZE_CAP else f"  ·  goes to {SIZE_CAP:g}u if he reaches ${SIZE_CAP * a:,.0f}"
+    return (f"\U0001f4b5 **Your bet: {u:.1f}u → risk ${risk:,.0f} to win ${win:,.0f}** @ {price * 100:.1f}c"
+            f"  ·  he's at {r:.1f}x his ${a:,.0f} avg{tail}")
+
+
+alert_tier = {}          # pkey -> 0 (wait) / 1 (betting) / 2 (max): BET NOW / MAX pings fire when this goes up
+alert_units = {}         # pkey -> units you were told to bet so far (so ADD pings say how much MORE)
+
+
 def handle_trade(trade, label, wallet):
     side = trade.get("side", "")
     if side not in ("BUY", "SELL"):
@@ -1522,6 +1610,8 @@ def handle_trade(trade, label, wallet):
     if wallet in WALLET_ALLOW_SPORTS and _sport_of(event_slug) not in WALLET_ALLOW_SPORTS[wallet]:
         return
     if _sport_of(event_slug) in WALLET_BLOCK_SPORTS.get(wallet, ()):
+        return
+    if wallet in WATCH_WALLETS:
         return
 
     fill_size = trade.get("usdcSize", 0)
@@ -1579,8 +1669,26 @@ def handle_trade(trade, label, wallet):
     threshold = WALLET_MIN_SIZE.get(wallet, MIN_SIZE)
 
     if pkey in alerted_positions:
-        # Already pinged: keep the ORIGINAL message current (size / VWAP / +EV) instead of pinging again.
+        # Already pinged: keep the ORIGINAL message current (size / VWAP / +EV) instead of pinging again,
+        # except a short BET NOW / MAX SIZE ping when he crosses 1x / 2x his average bet.
         m = alert_msgs.get(pkey)
+        u = units_for(wallet, accumulated) if side == "BUY" else 0
+        tier = 0 if u == 0 else (2 if u >= SIZE_CAP else 1)
+        if tier > alert_tier.get(pkey, 0):
+            alert_tier[pkey] = tier
+            px_now = trade.get("price") or entry_vwap
+            prev = alert_units.get(pkey, 0.0)
+            alert_units[pkey] = u
+            if prev > 0:
+                add = round(u - prev, 1); rk, wn = bet_dollars(add, px_now)
+                body = (f"\U0001f4b5 **Add {add:.1f}u → risk ${rk:,.0f} to win ${wn:,.0f}** @ {px_now * 100:.1f}c"
+                        f"  ·  total now {u:.1f}u (max)  ·  he's at {accumulated / avg_bet(wallet):.1f}x his ${avg_bet(wallet):,.0f} avg")
+            else:
+                body = sizing_line(wallet, accumulated, px_now)
+            head = "\U0001f7e2 **BET NOW**" if prev == 0 else "\u2b06\ufe0f **ADD TO MAX**"
+            _post_discord(f"<@{DISCORD_USER_ID}> {head} — {label} · **{outcome}** · {title}\n" + body)
+            if m:
+                m["last_edit"] = 0
         if m and m.get("id") and time.time() - m.get("last_edit", 0) >= EDIT_MIN_GAP:
             m["last_edit"] = time.time()
             if side == "BUY" and cid:
@@ -1590,6 +1698,9 @@ def handle_trade(trade, label, wallet):
     if accumulated < EARLY_ALERT_FRAC * threshold:
         return
     alerted_positions.add(pkey)
+    u0 = units_for(wallet, accumulated) if side == "BUY" else 0
+    alert_tier[pkey] = 0 if u0 == 0 else (2 if u0 >= SIZE_CAP else 1)
+    alert_units[pkey] = u0
     if side == "BUY" and cid:
         alerted_markets[(wallet, cid)] = {"outcome": outcome, "title": title, "size": accumulated}
     send_discord_alert(trade, label, wallet, gs, accumulated, entry_vwap, pkey=pkey, threshold=threshold)
