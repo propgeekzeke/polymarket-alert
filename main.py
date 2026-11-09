@@ -8,17 +8,10 @@ app = Flask(__name__)
 
 WALLETS = {
     # Core: consistent CLV-beaters (curated 2026-07-15)
-    "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255": "#Airpods123",   # 76% beat, +1.24% CLV (n=83), $1.02M
-    "0xa804390f80019699ab34a282c0df7528fba82a75": "#RiverSkew",    # 65% beat, +2.16% CLV (n=154), $389k
-    "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": "#Hot2Trot",     # 67% beat, +2.67% CLV (n=33), soccer whale $2.11M
-    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": "#Sharp2a2C",    # 70% beat, +0.88% CLV (n=20), $4.31M
-    "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": "#Gardiner",     # 60% beat, +0.76% CLV (n=166), $207k
     "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": "#Sharp076d",    # 71% beat, +1.82% CLV / +3.14% wtd (n=21), $3.76M, soccer +15.6% ROI
     # Whales: don't beat CLV (likely bet late to hide it) but hugely profitable - tail on selection
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": "#Whale2c33",    # $6.52M all-time, in-line CLV
     # CFB specialists (prober 2026-09-12: 567 games / 9,112 markets scanned, full-history pre-game CLV)
-    "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": "#SeriouslySirius",  # CFB 71% beat, +2.84% CLV (n=251), $3.65M
-    "0xb889590a2fab0c810584a660518c4c020325a430": "#Ems123",           # CFB 84% beat, +0.92% CLV (n=25), $961k, avg $46k
     # Prober 2026-10-09: 4,794 markets / 3,420 wallets scanned, full-history trade-based CLV
     "0x924379a79c64b77ad5816ad362122a5f6228658e": "#KchTemp",          # 68% beat, +1.13% CLV (n=236, 0% live); NFL 78%/n55; $2.51M, avg $47k
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BreakTheBank",     # 71% beat, +1.91% CLV (n=119); soccer +4.18%/71%, NFL 69%; $5.08M, avg $28k
@@ -45,15 +38,8 @@ MAX_TRADE_AGE = 12 * 3600  # never alert on trades older than this (prevents re-
 
 WALLET_MIN_SIZE = {
     # Conviction thresholds ~= 80% of each wallet's average bet - only real plays ping
-    "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255": 65000,  # #Airpods123 (avg $84k)
-    "0xa804390f80019699ab34a282c0df7528fba82a75": 5000,   # #RiverSkew (avg $6.4k)
-    "0xb61b2079b95f6b7476fd3203e0274ffb93308a06": 85000,  # #Hot2Trot (avg $108k)
-    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": 30000,  # #Sharp2a2C (avg $38k)
-    "0xec8d7bf83a1db5f06b9535985e58ffd17708dd71": 5500,   # #Gardiner (avg $7k)
     "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": 6500,   # #Sharp076d (avg $8.1k)
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 75000,  # #Whale2c33 (conviction floor; skips market-making)
-    "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": 10000,  # #SeriouslySirius (elite in 5 sports; NBA/NHL/soccer avg $22-33k, NFL $144k)
-    "0xb889590a2fab0c810584a660518c4c020325a430": 37000,  # #Ems123 (avg $46k)
     "0x924379a79c64b77ad5816ad362122a5f6228658e": 38000,  # #KchTemp (avg $47k; his >=80% bets beat close 74%)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 22000,  # #BreakTheBank (avg $28k)
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": 8000,   # #Bc43 (NFL avg $25k, NBA $3k)
@@ -83,12 +69,10 @@ WALLET_ALLOW_SPORTS = {
 WALLET_BLOCK = {
     # per-sport test 2026-09-14 (per_sport_report_2026-09-14.md): block sports with no pre-game CLV edge
     "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": _TENNIS + _ESPORTS,            # #Sharp076d: soccer only (tennis 50% beat, 56% live)
-    "0xa804390f80019699ab34a282c0df7528fba82a75": _TENNIS + _ESPORTS,            # #RiverSkew: tennis -0.16% CLV (n=64), esports 43% beat
-    "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": _TENNIS + _ESPORTS + ("nhl-",),# #Sharp2a2C: edge is CBB+soccer; NHL/esports in-line, tennis -$1.69M
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": ("nfl-", "cfb-"),               # #Whale2c33: NFL 29% beat / -2.59% CLV, CFB 36% beat
     "0x924379a79c64b77ad5816ad362122a5f6228658e": _TENNIS + _ESPORTS + ("ufc-",),                     # #KchTemp: tennis -2.8% ROI; soccer blocked via WALLET_BLOCK_SPORTS (-3.2% ROI, n=112)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": _TENNIS + _ESPORTS + ("nba-", "wnba-", "mlb-"),     # #BreakTheBank: NBA -10% ROI, MLB -41% ROI (n=41), tennis -11%; NFL +27%, soccer kept (+2.9%)
-    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": _TENNIS + _ESPORTS + ("nhl-", "ufc-", "cfb-", "cbb-"),  # #Bc43: NFL/NBA/MLB only (soccer handled below)
+    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": _TENNIS + _ESPORTS + ("nhl-", "ufc-", "cfb-", "cbb-", "nba-", "wnba-"),  # #Bc43: NFL/MLB only; NBA 49% beat / -33% ROI (60d regrade 2026-11-09)
 }
 
 # --- Runtime state -----------------------------------------------------------
