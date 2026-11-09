@@ -21,6 +21,8 @@ WALLETS = {
     "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": "#justwins",         # 67% beat / +0.7% CLV (n=105), +22.1% ROI, avg $37k; NBA/CFB/NFL/soccer
     "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": "#Jsram",            # soccer 66% beat / +1.1% CLV (n=50), +39% ROI, avg $40k
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": "#drainedandpoor",   # NBA 70% beat / +1.9% CLV (n=80), +20% ROI; esports weak (blocked)
+    # Discovery scan 2026-11-09 (first weekly run): only wallet of 357 to clear the bar
+    "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": "#forecastication4", # NFL 82% beat / +2.5% med CLV / +24.6% ROI (n=73, since Jul 20); avg $2.6k; NFL only
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -52,6 +54,7 @@ WALLET_MIN_SIZE = {
     "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": 29000,  # #justwins (avg $36k)
     "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": 32000,  # #Jsram (pre-game soccer avg $40k)
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": 11000,  # #drainedandpoor (NBA avg $13.7k)
+    "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": 2050,   # #forecastication4 (NFL avg $2,560 -> 1u at $2,560, 2u at $5,125)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
@@ -69,6 +72,7 @@ WALLET_ALLOW_SPORTS = {
     "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": ("CFB", "NFL"),   # #mde4life1986: NBA 38% beat
     "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": ("Soccer",),       # #Jsram
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": ("NBA",),          # #drainedandpoor: esports 57% beat
+    "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": ("NFL",),          # #forecastication4: soccer 56% / NBA 58% beat, CFB flat CLV
 }
 
 WALLET_BLOCK = {
