@@ -84,7 +84,9 @@ wallet_profiles = {}     # wallet -> profile dict (cached at startup)
 game_starts = {}         # eventSlug -> game start ts (None = no game time found)
 event_titles = {}        # eventSlug -> event title (e.g. "Iowa vs. Michigan") for fixture matching
 consensus_book = {}      # (eventSlug, outcome) -> {wallet: total USDC}
-consensus_alerted = set()  # (eventSlug, outcome) already alerted
+consensus_alerted = set()  # (conditionId, outcome) already alerted
+consensus_px = {}        # (conditionId, outcome) -> {wallet: sum(USDC * price)} for each wallet's avg entry
+consensus_msgs = {}      # (conditionId, outcome) -> {"id", "pin", "n", "ev", "title", "outcome", "trade"}: edit as more wallets join
 alert_progress = {}      # (wallet, eventSlug, outcome, side) -> USDC accumulated since last alert
 alert_pxsum = {}         # same key -> sum(USDC * price) for entry VWAP
 alert_msgs = {}          # same key -> {"id": discord msg id, "pin": devig dict, "last_edit": ts, "trade": first trade}
@@ -913,6 +915,359 @@ def compute_wallet_card(wallet):
         "soc_roi": round(soc_pnl / soc_cost * 100, 1) if soc_cost > 0 else None,
     }
 
+# --- Tail tracker / weekly self-grade / weekly discovery ----------------------
+# Everything here is recomputed from the Data API (v2), so nothing is lost when Render redeploys and wipes /tmp.
+REPORT_WEEKDAY  = 0      # Monday
+REPORT_HOUR_UTC = 13     # ~8-9am ET: self-grade at 13:00 UTC, discovery at 14:00 UTC
+TAIL_STAKE      = 1000   # to-win $1k on favorites, risk $1k on dogs
+GRADE_FLAG_BEAT = 55     # flag a wallet if pre-game beat-close % falls below this (n >= GRADE_FLAG_N)
+GRADE_FLAG_N    = 20
+reports = {"selfgrade": None, "discovery": None, "running": set()}
+report_state = {}        # {"selfgrade_day": "YYYY-MM-DD", "discovery_day": ...}
+
+
+def _post_long(text):
+    """Discord caps messages at 2000 chars: split on lines."""
+    chunk = ""
+    for ln in text.split("\n"):
+        if len(chunk) + len(ln) + 1 > 1900:
+            _post_discord(chunk)
+            chunk = ""
+        chunk += ln + "\n"
+    if chunk.strip():
+        _post_discord(chunk)
+
+
+def _gamma_event_starts(slugs, workers=6):
+    """event slug -> {"gs": first gameStartTime (what the bot uses), "m": {conditionId: gameStartTime}}"""
+    def one(e):
+        try:
+            d = requests.get("https://gamma-api.polymarket.com/events", params={"slug": e}, timeout=15).json()
+            out = {"gs": None, "m": {}}
+            for mk in (d[0].get("markets", []) if d else []):
+                g = mk.get("gameStartTime")
+                if not g:
+                    continue
+                t = int(datetime.strptime(g[:19].replace(" ", "T"), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+                out["m"][mk.get("conditionId")] = t
+                if out["gs"] is None:
+                    out["gs"] = t
+            return e, out
+        except Exception:
+            return e, None
+    res = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for e, v in ex.map(one, list(slugs)):
+            if v is not None:
+                res[e] = v
+    return res
+
+
+def _settlements(conds, workers=4):
+    """conditionId list -> {token_id: final_price (0..1) or None if unresolved}"""
+    conds = sorted(set(c for c in conds if c))
+    def one(cs):
+        try:
+            return requests.get(DAPI + "tokens", params={"condition": ",".join(cs)}, timeout=30).json().get("data") or []
+        except Exception:
+            return []
+    out = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for rows in ex.map(one, [conds[i:i + 10] for i in range(0, len(conds), 10)]):
+            for r in rows:
+                fp = r.get("final_price")
+                out[r["token_id"]] = float(fp) if (r.get("resolved") and fp is not None) else None
+    return out
+
+
+def _closes(pairs, workers=6):
+    """[(token, game_start)] -> {token: last CLOB price at/before kickoff}"""
+    def one(a):
+        return a[0], get_closing_price(a[0], a[1])
+    out = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for t, c in ex.map(one, list(pairs)):
+            if c is not None:
+                out[t] = c
+    return out
+
+
+def _tail_bet(price, final):
+    """Your sizing: risk $1k on dogs (<=50c), risk-to-win $1k on favorites. Returns (risk, pnl or None)."""
+    risk = TAIL_STAKE if price <= 0.5 else TAIL_STAKE * price / (1 - price)
+    if final is None:
+        return risk, None
+    return risk, risk * (final / price - 1)
+
+
+def _passes_filters(wallet, ev, title):
+    if _is_futures(title, ev) or _is_prop_noise(title, ev):
+        return False
+    if any(ev.startswith(p) for p in WALLET_BLOCK.get(wallet, ())):
+        return False
+    sp = _sport_of(ev)
+    if wallet in WALLET_ALLOW_SPORTS and sp not in WALLET_ALLOW_SPORTS[wallet]:
+        return False
+    if sp in WALLET_BLOCK_SPORTS.get(wallet, ()):
+        return False
+    return True
+
+
+def replay_pings(days=30):
+    """Re-run every roster wallet's BUY fills through the live ping rules (filters, thresholds, EARLY_ALERT_FRAC,
+    consensus) and grade each ping at the price it fired: CLV vs close + settled result at TAIL_STAKE sizing."""
+    start = int(time.time()) - days * 86400
+    fills = {}
+    for w in WALLETS:
+        rows = _dapi("activity", {"user": w, "type": "TRADE", "side": "BUY", "start": start, "limit": 1000},
+                     max_rows=80000, timeout=40)
+        fills[w] = [t for t in rows if t.get("side") == "BUY" and _passes_filters(w, t.get("eventSlug") or "", t.get("title") or "")]
+    # only events where some key could reach a ping need a game time
+    need, tot = set(), {}
+    for w, rows in fills.items():
+        for t in rows:
+            k = (w, t["eventSlug"], t.get("outcome"))
+            tot[k] = tot.get(k, 0) + (t.get("usdcSize") or 0)
+    for (w, ev, o), u in tot.items():
+        if u >= min(EARLY_ALERT_FRAC * WALLET_MIN_SIZE.get(w, MIN_SIZE), max(CONSENSUS_MIN, 0.25 * WALLET_MIN_SIZE.get(w, MIN_SIZE))):
+            need.add(ev)
+    G = _gamma_event_starts(need)
+    pings, cbook, cdone, events = [], {}, set(), []
+    for w, rows in fills.items():
+        for t in rows:
+            events.append((t.get("timestamp") or 0, w, t))
+    events.sort(key=lambda x: x[0])
+    prog, done = {}, set()
+    for ts, w, t in events:
+        ev = t["eventSlug"]; g = G.get(ev)
+        if g is None:
+            continue
+        if g["gs"] and ts >= g["gs"]:
+            continue
+        out, usd, px = t.get("outcome"), t.get("usdcSize") or 0, t.get("price") or 0
+        gs = g["m"].get(t.get("conditionId")) or g["gs"]
+        base = {"ts": ts, "ev": ev, "out": out, "title": t.get("title"), "tok": t.get("asset"),
+                "cond": t.get("conditionId"), "px": px, "gs": gs, "sport": _sport_of(ev)}
+        k = (w, ev, out)
+        if k not in done:
+            prog[k] = prog.get(k, 0) + usd
+            if prog[k] >= EARLY_ALERT_FRAC * WALLET_MIN_SIZE.get(w, MIN_SIZE):
+                done.add(k)
+                pings.append(dict(base, kind="wallet", wallet=w, label=WALLETS[w]))
+        ck = (t.get("conditionId"), out)
+        b = cbook.setdefault(ck, {})
+        b[w] = b.get(w, 0) + usd
+        q = [x for x, a in b.items() if a >= max(CONSENSUS_MIN, 0.25 * WALLET_MIN_SIZE.get(x, MIN_SIZE))]
+        if len(q) >= 2 and ck not in cdone:
+            cdone.add(ck)
+            pings.append(dict(base, kind="consensus", wallet=",".join(q), label=" + ".join(WALLETS[x] for x in q)))
+    now = time.time()
+    fin = _settlements([p["cond"] for p in pings])
+    cl = _closes({(p["tok"], p["gs"]) for p in pings if p["gs"] and p["gs"] < now})
+    for p in pings:
+        e = p["px"]
+        p["close"] = cl.get(p["tok"])
+        p["clv"] = (p["close"] / e - 1) * 100 if (p["close"] and 0.02 < e < 0.98) else None
+        p["risk"], p["pnl"] = _tail_bet(e, fin.get(p["tok"])) if 0.02 < e < 0.98 else (0, None)
+    return pings
+
+
+def _tail_summary(rows):
+    s = [x for x in rows if x.get("pnl") is not None]
+    c = [x["clv"] for x in rows if x.get("clv") is not None]
+    risk = sum(x["risk"] for x in s); pnl = sum(x["pnl"] for x in s)
+    return {"pings": len(rows), "graded": len(s), "risked": round(risk), "pnl": round(pnl),
+            "roi": round(100 * pnl / risk, 1) if risk else None,
+            "clv": round(sum(c) / len(c), 2) if c else None,
+            "clv_med": round(statistics.median(c), 2) if c else None,
+            "beat": round(100 * sum(1 for y in c if y > 0) / len(c)) if c else None}
+
+
+def _fmt_tail(lab, s, width=16):
+    if not s["graded"]:
+        return f"`{lab:<{width}}` {s['pings']} pings, none settled yet"
+    roi = f"{s['roi']:+.1f}%" if s["roi"] is not None else "n/a"
+    clv = f"CLV med {s['clv_med']:+.2f}% (avg {s['clv']:+.2f}%) · beat {s['beat']}%" if s["clv"] is not None else ""
+    return f"`{lab:<{width}}` {s['graded']:>3} bets · **${s['pnl']:+,}** · ROI **{roi}** · {clv}"
+
+
+def run_selfgrade(post=True, days=30):
+    """Weekly: every roster wallet, last `days` days, only the sports the bot pings for."""
+    if "selfgrade" in reports["running"]:
+        return reports["selfgrade"]
+    reports["running"].add("selfgrade")
+    try:
+        t0 = time.time()
+        pings = replay_pings(days)
+        wp = [p for p in pings if p["kind"] == "wallet"]
+        cp = [p for p in pings if p["kind"] == "consensus"]
+        per = []
+        for w, label in WALLETS.items():
+            mine = [p for p in wp if p["wallet"] == w]
+            s = _tail_summary(mine)
+            o = get_official_pnl(w)
+            flag = (s["clv"] is not None and s["graded"] >= GRADE_FLAG_N and (s["beat"] < GRADE_FLAG_BEAT or s["clv_med"] < 0))
+            per.append({"label": label, "wallet": w, "tail": s, "lifetime": o.get("all"), "d30": o.get("d30"), "flag": flag,
+                        "sports": {sp: _tail_summary([p for p in mine if p["sport"] == sp])
+                                   for sp in sorted({p["sport"] for p in mine})}})
+        per.sort(key=lambda r: -(r["tail"]["pnl"] or 0))
+        res = {"updated": datetime.now(timezone.utc).isoformat(), "days": days, "secs": round(time.time() - t0),
+               "all": _tail_summary(wp), "consensus": _tail_summary(cp), "wallets": per,
+               "pings": [{k: p.get(k) for k in ("kind", "label", "title", "out", "px", "close", "clv", "risk", "pnl", "gs", "ts", "sport")}
+                         for p in sorted(pings, key=lambda p: -p["ts"])]}
+        reports["selfgrade"] = res
+        if post:
+            L = [f"<@{DISCORD_USER_ID}>",
+                 f"# \U0001f4cb Weekly self-grade — last {days} days",
+                 "_Every ping the bot sent (replayed from the wallets' fills), bet at the ping price: risk $1k on dogs, to-win $1k on favorites._",
+                 _fmt_tail("ALL PINGS", res["all"]),
+                 _fmt_tail("\U0001f6a8 CONSENSUS", res["consensus"]),
+                 ""]
+            for r in per:
+                lt = f"lifetime ${r['lifetime']:+,} · 30d ${r['d30']:+,}" if r.get("lifetime") is not None else ""
+                L.append(("⚠️ " if r["flag"] else "") + _fmt_tail(r["label"], r["tail"]) + (f" · _{lt}_" if lt else ""))
+                for sp, s in r["sports"].items():
+                    if s["graded"] >= 5 and len(r["sports"]) > 1 and sp != "Other":
+                        c = f" · CLV med {s['clv_med']:+.2f}% · beat {s['beat']}%" if s["clv"] is not None else ""
+                        L.append(f"   ↳ {sp}: {s['graded']} · ROI {s['roi']:+.1f}%{c}")
+            fl = [r["label"] for r in per if r["flag"]]
+            L.append("")
+            L.append(f"⚠️ **Review:** {', '.join(fl)} (beat close < {GRADE_FLAG_BEAT}% or median CLV < 0 over {GRADE_FLAG_N}+ pings)" if fl
+                     else "✅ No wallet below the beat-close / CLV bar this week.")
+            _post_long("\n".join(L))
+        return res
+    except Exception as e:
+        print(f"Self-grade error: {e}", flush=True)
+    finally:
+        reports["running"].discard("selfgrade")
+
+
+def run_discovery(post=True, days=45):
+    """Weekly: sports leaderboards -> settled ROI on $1k+ bets -> pre-game CLV on the survivors -> post top 5."""
+    if "discovery" in reports["running"]:
+        return reports["discovery"]
+    reports["running"].add("discovery")
+    try:
+        t0 = time.time()
+        roster = {w.lower() for w in WALLETS}
+        cands = {}
+        for tp in ("month", "week"):
+            for sb in ("PNL", "VOLUME"):
+                for r in _dapi("leaderboard", {"time_period": tp, "category": "sports", "sort_by": sb, "limit": 100}, max_rows=300):
+                    w = (r.get("user_id") or "").lower()
+                    if w and w not in roster:
+                        c = cands.setdefault(w, {"name": r.get("user_name"), "pnl": 0, "vol": 0})
+                        c["pnl"] = max(c["pnl"], r.get("pnl") or 0); c["vol"] = max(c["vol"], r.get("volume") or 0)
+        cands = {w: c for w, c in cands.items() if c["pnl"] > 0 and c["vol"] >= 300000}
+        start = int(time.time()) - days * 86400
+
+        def pull(w):
+            rows = _dapi("activity", {"user": w, "type": "TRADE", "start": start, "limit": 1000}, max_rows=5000, timeout=30)
+            agg, sells, buys = {}, 0.0, 0.0
+            for t in rows:
+                u = t.get("usdcSize") or 0
+                if t.get("side") != "BUY":
+                    sells += u; continue
+                buys += u
+                a = agg.setdefault(t.get("asset"), {"usd": 0, "sh": 0, "last": 0, "ev": t.get("eventSlug") or "", "cond": t.get("conditionId")})
+                a["usd"] += u; a["sh"] += t.get("size") or 0; a["last"] = max(a["last"], t.get("timestamp") or 0)
+            return w, {"pos": {k: v for k, v in agg.items() if v["usd"] >= 1000 and v["sh"] > 0 and _sport_of(v["ev"]) != "Other"},
+                       "sell_ratio": sells / buys if buys else 0}
+        data = {}
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for w, v in ex.map(pull, list(cands)):
+                data[w] = v
+        fin = _settlements([p["cond"] for v in data.values() for p in v["pos"].values()])
+        stage1 = []
+        for w, v in data.items():
+            st = [(t, p) for t, p in v["pos"].items() if fin.get(t) is not None]
+            if len(st) < 30 or v["sell_ratio"] >= 0.25:
+                continue
+            cost = sum(p["usd"] for _, p in st); pnl = sum(p["sh"] * fin[t] - p["usd"] for t, p in st)
+            hi = sum(1 for _, p in st if p["usd"] / p["sh"] >= 0.85) / len(st)
+            if cost / len(st) < 2500 or pnl / cost < 0.03 or hi >= 0.25:
+                continue
+            stage1.append((pnl / cost * min(1, len(st) / 100), w, len(st), cost, pnl))
+        stage1 = sorted(stage1, reverse=True)[:20]
+        top = [w for _, w, *_ in stage1]
+        G = _gamma_event_starts({p["ev"] for w in top for p in data[w]["pos"].values()})
+        pairs = set()
+        for w in top:
+            for t, p in data[w]["pos"].items():
+                gs = G.get(p["ev"], {}).get("m", {}).get(p["cond"])
+                p["gs"] = gs
+                if gs and p["last"] < gs < time.time():
+                    pairs.add((t, gs))
+        cl = _closes(pairs)
+        out = []
+        for _, w, n_set, cost, pnl in stage1:
+            pre, by = [], {}
+            for t, p in data[w]["pos"].items():
+                e = p["usd"] / p["sh"]
+                if not p.get("gs") or p["last"] >= p["gs"] or t not in cl or not 0.03 < e < 0.97:
+                    continue
+                f = fin.get(t)
+                x = {"clv": (cl[t] / e - 1) * 100, "usd": p["usd"], "pnl": (p["sh"] * f - p["usd"]) if f is not None else None,
+                     "mins": (p["gs"] - p["last"]) / 60, "sp": _sport_of(p["ev"])}
+                pre.append(x); by.setdefault(x["sp"], []).append(x)
+            if len(pre) < 30:
+                continue
+            beat = 100 * sum(1 for x in pre if x["clv"] > 0) / len(pre)
+            clv = sum(x["clv"] for x in pre) / len(pre)
+            if beat < 62 or clv <= 0:
+                continue
+            sports = []
+            for sp, xs in sorted(by.items(), key=lambda kv: -len(kv[1])):
+                if len(xs) >= 10:
+                    sb = 100 * sum(1 for x in xs if x["clv"] > 0) / len(xs)
+                    sv = [x for x in xs if x["pnl"] is not None]
+                    sr = 100 * sum(x["pnl"] for x in sv) / max(1, sum(x["usd"] for x in sv))
+                    sports.append(f"{sp} {len(xs)}: {sb:.0f}% beat / {sum(x['clv'] for x in xs)/len(xs):+.1f}% CLV / {sr:+.0f}% ROI")
+            out.append({"wallet": w, "name": cands[w]["name"], "n": len(pre), "beat": round(beat), "clv": round(clv, 2),
+                        "roi": round(100 * pnl / cost, 1), "avg": round(cost / n_set),
+                        "mins": round(statistics.median(x["mins"] for x in pre)), "sports": sports})
+        out.sort(key=lambda r: (-r["beat"], -r["clv"]))
+        res = {"updated": datetime.now(timezone.utc).isoformat(), "scanned": len(cands), "stage1": len(stage1),
+               "secs": round(time.time() - t0), "candidates": out[:10]}
+        reports["discovery"] = res
+        if post:
+            L = [f"<@{DISCORD_USER_ID}>",
+                 f"# \U0001f50e Weekly discovery scan",
+                 f"_{len(cands)} profitable sports-leaderboard wallets → {len(stage1)} passed settled ROI ({days}d) → graded on pre-game CLV. Bar: 62%+ beat close, CLV > 0, 30+ pre-game bets._"]
+            if not out:
+                L.append("No new wallet cleared the bar this week.")
+            for r in out[:5]:
+                L.append(f"\n**{r['name'] or r['wallet'][:10]}** — <https://polymarket.com/profile/{r['wallet']}>")
+                L.append(f"{r['n']} pre-game bets · beat close **{r['beat']}%** · CLV **{r['clv']:+.2f}%** · ROI **{r['roi']:+.1f}%** · avg ${r['avg']:,} · bets ~{r['mins']} min pre-KO")
+                for s in r["sports"][:4]:
+                    L.append(f"   ↳ {s}")
+            L.append("\n_Reply in chat with who to add (and which sports) and it gets deployed._")
+            _post_long("\n".join(L))
+        return res
+    except Exception as e:
+        print(f"Discovery error: {e}", flush=True)
+    finally:
+        reports["running"].discard("discovery")
+
+
+def _report_scheduler():
+    """Mondays: self-grade at REPORT_HOUR_UTC, discovery an hour later. Checked every 10 min."""
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            day = now.strftime("%Y-%m-%d")
+            if now.weekday() == REPORT_WEEKDAY:
+                if now.hour >= REPORT_HOUR_UTC and report_state.get("selfgrade_day") != day:
+                    report_state["selfgrade_day"] = day; save_state()
+                    run_selfgrade(post=True)
+                if now.hour >= REPORT_HOUR_UTC + 1 and report_state.get("discovery_day") != day:
+                    report_state["discovery_day"] = day; save_state()
+                    run_discovery(post=True)
+        except Exception as e:
+            print(f"Report scheduler error: {e}", flush=True)
+        time.sleep(600)
+
+
 # --- State persistence -------------------------------------------------------
 
 def save_state():
@@ -926,6 +1281,7 @@ def save_state():
                 "wallet_cards": wallet_cards,
                 "sport_stats": sport_stats,
                 "alerted_positions": ["|".join(k) for k in alerted_positions],
+                "report_state": report_state,
             }, fh)
     except Exception:
         pass
@@ -945,6 +1301,7 @@ def load_state():
         clv_baseline.update(d.get("clv_baseline", {}))
         wallet_cards.update(d.get("wallet_cards", {}))
         sport_stats.update(d.get("sport_stats", {}))
+        report_state.update(d.get("report_state", {}))
         for k in d.get("alerted_positions", []):
             parts = k.split("|")
             if len(parts) == 4:
@@ -1099,24 +1456,51 @@ def send_hedge_alert(label, wallet, title, orig, new_outcome, new_size, price, g
     _post_discord("\n".join(lines))
 
 
-def send_consensus_alert(event_slug, outcome, title, book, trade):
+def build_consensus_content(event_slug, outcome, title, book, ckey, pin):
     gs = game_starts.get(event_slug)
-    names = [f"{WALLETS.get(w, w[:8])} (${amt:,.0f})" for w, amt in
-             sorted(book.items(), key=lambda x: -x[1])]
-    price = trade.get("price", 0)
-    asset = trade.get("asset", "")
+    pxb = consensus_px.get(ckey, {})
+    asset = (consensus_msgs.get(ckey) or {}).get("asset")
     now_price = get_current_ask(asset) if asset else None
+    sport = _sport_of(event_slug)
+    total = sum(book.values())
+    names = " + ".join(WALLETS.get(w, w[:8]) for w in sorted(book, key=lambda x: -book[x]))
     lines = [
         f"<@{DISCORD_USER_ID}>",
-        f"\U0001f6a8\U0001f6a8 **CONSENSUS -- {len(book)} sharps on the same side** | PRE-GAME ({_countdown(gs)})",
-        f"**{title}**",
-        f"BUY **{outcome}** -- " + ", ".join(names),
+        f"# \U0001f6a8 CONSENSUS — {len(book)} SHARPS ON IT",
+        f"**{names}**",
+        f"**{title}**  ·  PRE-GAME ({_countdown(gs)})",
+        f"## BUY {outcome}",
     ]
-    if now_price is not None:
-        lines.append(f"Current price: **{round(now_price*100,1)}c** ({price_to_american(now_price)})")
+    for w in sorted(book, key=lambda x: -book[x]):
+        avg = pxb.get(w, 0) / book[w] if book[w] else 0
+        ss = (sport_stats.get(w) or {}).get(sport) or {}
+        rec = (f"  ·  {sport} {ss['beat_close_pct']}% beat / {ss['avg_clv_pp']:+.2f}% CLV (n={ss['n']})"
+               if ss.get("n") and ss.get("beat_close_pct") is not None else "")
+        lines.append(f"• **{WALLETS.get(w, w[:8])}** ${book[w]:,.0f} @ {avg * 100:.1f}c{rec}")
+    lines.append(f"Combined **${total:,.0f}**")
+    ref = now_price
+    if pin:
+        if ref is None:
+            ref = (sum(pxb.values()) / sum(book[w] for w in pxb)) if pxb else None
+        ev_txt = ""
+        if ref is not None:
+            ev_txt = f"  ·  now **{ref * 100:.1f}c** ({price_to_american(ref)})  ·  +EV: **{'Yes' if ref <= pin['fair'] else 'No'}** ({(pin['fair'] - ref) * 100:+.1f}c)"
+        lines.append(f"\U0001f3af Pinnacle fair **{pin['fair'] * 100:.1f}c** (power devig){ev_txt}")
     else:
-        lines.append(f"Last fill: **{round(price*100,1)}c**")
-    _post_discord("\n".join(lines))
+        lines.append("\U0001f3af Pinnacle fair: n/a" + (f"  ·  now **{ref * 100:.1f}c** ({price_to_american(ref)})" if ref is not None else ""))
+    return "\n".join(lines)
+
+
+def send_consensus_alert(event_slug, outcome, title, book, trade, ckey=None):
+    ckey = ckey or (trade.get("conditionId") or event_slug, outcome)
+    gs = game_starts.get(event_slug)
+    asset = trade.get("asset", "")
+    consensus_msgs[ckey] = {"asset": asset, "n": len(book), "last_edit": time.time()}
+    now_price = get_current_ask(asset) if asset else None
+    ref = now_price if now_price is not None else trade.get("price", 0)
+    pin = get_optic_devig(event_slug, title, outcome, ref, gs) or get_pinnacle_devig(event_slug, title, outcome, ref)
+    consensus_msgs[ckey]["pin"] = pin
+    consensus_msgs[ckey]["id"] = _post_discord(build_consensus_content(event_slug, outcome, title, book, ckey, pin))
 
 # --- Trade handling ----------------------------------------------------------
 
@@ -1161,11 +1545,19 @@ def handle_trade(trade, label, wallet):
     if side == "BUY":
         book = consensus_book.setdefault(ckey, {})
         book[wallet] = book.get(wallet, 0) + fill_size
+        pxb = consensus_px.setdefault(ckey, {})
+        pxb[wallet] = pxb.get(wallet, 0) + fill_size * (trade.get("price") or 0)
         qualified = {w: amt for w, amt in book.items()
                      if amt >= max(CONSENSUS_MIN, 0.25 * WALLET_MIN_SIZE.get(w, MIN_SIZE))}
         if len(qualified) >= 2 and ckey not in consensus_alerted:
             consensus_alerted.add(ckey)
-            send_consensus_alert(event_slug, outcome, title, qualified, trade)
+            send_consensus_alert(event_slug, outcome, title, qualified, trade, ckey)
+        elif len(qualified) >= 2 and ckey in consensus_msgs:
+            m = consensus_msgs[ckey]
+            if len(qualified) > m["n"] or time.time() - m.get("last_edit", 0) >= 60:
+                m["n"] = len(qualified); m["last_edit"] = time.time()
+                if m.get("id"):
+                    _edit_discord(m["id"], build_consensus_content(event_slug, outcome, title, qualified, ckey, m.get("pin")))
 
     # Hedge detection: wallet buys the OPPOSITE side of a market we already pinged -> follow-up warning
     cid = trade.get("conditionId", "")
@@ -1222,6 +1614,7 @@ def monitor_loop():
             print(f"Card/CLV error {label}: {e}", flush=True)
     save_state()
     threading.Thread(target=_load_sport_stats, daemon=True).start()
+    threading.Thread(target=_report_scheduler, daemon=True).start()
     cycles = 0
     while True:
         try:
@@ -1556,6 +1949,38 @@ def devig_test():
                     "optic_key_set": bool(OPTIC_API_KEY), "odds_key_set": bool(ODDS_API_KEY),
                     "optic": get_optic_devig(slug, title, outcome, price, gs),
                     "odds_api": get_pinnacle_devig(slug, title, outcome, price)})
+
+
+@app.route("/report/selfgrade")
+def report_selfgrade():
+    """Last weekly self-grade. ?run=1 starts a fresh one in the background (?post=1 also posts it to Discord)."""
+    from flask import request
+    ensure_monitor()
+    if request.args.get("run") == "1" and "selfgrade" not in reports["running"]:
+        threading.Thread(target=run_selfgrade, kwargs={"post": request.args.get("post") == "1"}, daemon=True).start()
+    r = reports["selfgrade"]
+    return jsonify({"running": "selfgrade" in reports["running"],
+                    "report": {k: v for k, v in r.items() if k != "pings"} if r else None})
+
+
+@app.route("/report/discovery")
+def report_discovery():
+    from flask import request
+    ensure_monitor()
+    if request.args.get("run") == "1" and "discovery" not in reports["running"]:
+        threading.Thread(target=run_discovery, kwargs={"post": request.args.get("post") == "1"}, daemon=True).start()
+    return jsonify({"running": "discovery" in reports["running"], "report": reports["discovery"]})
+
+
+@app.route("/tail")
+def tail():
+    """Live tail tracker: every ping in the last self-grade window, graded at the ping price."""
+    ensure_monitor()
+    r = reports["selfgrade"]
+    if not r:
+        return jsonify({"note": "no self-grade yet - hit /report/selfgrade?run=1", "running": "selfgrade" in reports["running"]})
+    return jsonify({"updated": r["updated"], "all": r["all"], "consensus": r["consensus"],
+                    "by_wallet": {w["label"]: w["tail"] for w in r["wallets"]}, "pings": r["pings"][:300]})
 
 
 @app.route("/clv")
