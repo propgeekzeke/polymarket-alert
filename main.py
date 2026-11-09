@@ -19,11 +19,15 @@ WALLETS = {
     # CFB specialists (prober 2026-09-12: 567 games / 9,112 markets scanned, full-history pre-game CLV)
     "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": "#SeriouslySirius",  # CFB 71% beat, +2.84% CLV (n=251), $3.65M
     "0xb889590a2fab0c810584a660518c4c020325a430": "#Ems123",           # CFB 84% beat, +0.92% CLV (n=25), $961k, avg $46k
-    "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": "#RoyaleStake",      # NHL: +1.00% CLV, 57% beat (n=233 full season), $198k, pre-game ML bettor - TRIAL
     # Prober 2026-10-09: 4,794 markets / 3,420 wallets scanned, full-history trade-based CLV
     "0x924379a79c64b77ad5816ad362122a5f6228658e": "#KchTemp",          # 68% beat, +1.13% CLV (n=236, 0% live); NFL 78%/n55; $2.51M, avg $47k
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BreakTheBank",     # 71% beat, +1.91% CLV (n=119); soccer +4.18%/71%, NFL 69%; $5.08M, avg $28k
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": "#Bc43",             # NFL 68%/n63, NBA 74%/n31; soccer/NHL blocked; +$1.19M 30d - TRIAL
+    # Prober 2026-11-08 (Data API v2): 650 sports-leaderboard wallets -> 45d settled ROI -> pre-game CLV. TRIAL, regrade ~Dec 8
+    "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": "#mde4life1986",     # CFB 91% beat / +7.8% CLV (n=57), NFL 69%; +20.9% ROI; bets ~6h pre-KO
+    "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": "#justwins",         # 67% beat / +0.7% CLV (n=105), +22.1% ROI, avg $37k; NBA/CFB/NFL/soccer
+    "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": "#Jsram",            # soccer 66% beat / +1.1% CLV (n=50), +39% ROI, avg $40k
+    "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": "#drainedandpoor",   # NBA 70% beat / +1.9% CLV (n=80), +20% ROI; esports weak (blocked)
 }
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -50,10 +54,13 @@ WALLET_MIN_SIZE = {
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 75000,  # #Whale2c33 (conviction floor; skips market-making)
     "0x16b29c50f2439faf627209b2ac0c7bbddaa8a881": 10000,  # #SeriouslySirius (elite in 5 sports; NBA/NHL/soccer avg $22-33k, NFL $144k)
     "0xb889590a2fab0c810584a660518c4c020325a430": 37000,  # #Ems123 (avg $46k)
-    "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": 1500,   # #RoyaleStake (avg $3.2k; size is not a signal for him, ping everything >=1.5k)
     "0x924379a79c64b77ad5816ad362122a5f6228658e": 38000,  # #KchTemp (avg $47k; his >=80% bets beat close 74%)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 22000,  # #BreakTheBank (avg $28k)
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": 8000,   # #Bc43 (NFL avg $25k, NBA $3k)
+    "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": 6300,   # #mde4life1986 (CFB/NFL avg $7.9k)
+    "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": 29000,  # #justwins (avg $36k)
+    "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": 32000,  # #Jsram (pre-game soccer avg $40k)
+    "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": 11000,  # #drainedandpoor (NBA avg $13.7k)
 }
 
 # Per-wallet sport block-list (event-slug prefixes). Sharp076d: soccer edge only - his tennis is
@@ -66,13 +73,19 @@ WALLET_BLOCK_SPORTS = {
     "0x924379a79c64b77ad5816ad362122a5f6228658e": ("Soccer",),   # #KchTemp: soccer -3.2% ROI on 112 bets (full on-chain history); NFL +32% / CFB +16% kept
 }
 
+# Allow-lists: if a wallet is listed here, ONLY these sports (_sport_of buckets) ever ping.
+WALLET_ALLOW_SPORTS = {
+    "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": ("CFB", "NFL"),   # #mde4life1986: NBA 38% beat
+    "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": ("Soccer",),       # #Jsram
+    "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": ("NBA",),          # #drainedandpoor: esports 57% beat
+}
+
 WALLET_BLOCK = {
     # per-sport test 2026-09-14 (per_sport_report_2026-09-14.md): block sports with no pre-game CLV edge
     "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": _TENNIS + _ESPORTS,            # #Sharp076d: soccer only (tennis 50% beat, 56% live)
     "0xa804390f80019699ab34a282c0df7528fba82a75": _TENNIS + _ESPORTS,            # #RiverSkew: tennis -0.16% CLV (n=64), esports 43% beat
     "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1": _TENNIS + _ESPORTS + ("nhl-",),# #Sharp2a2C: edge is CBB+soccer; NHL/esports in-line, tennis -$1.69M
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": ("nfl-", "cfb-"),               # #Whale2c33: NFL 29% beat / -2.59% CLV, CFB 36% beat
-    "0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240": _TENNIS + _ESPORTS + ("cfb-", "nfl-", "mlb-", "nba-", "wnba-", "cbb-", "ufc-"),  # #RoyaleStake: NHL only (CFB 43% beat)
     "0x924379a79c64b77ad5816ad362122a5f6228658e": _TENNIS + _ESPORTS + ("ufc-",),                     # #KchTemp: tennis -2.8% ROI; soccer blocked via WALLET_BLOCK_SPORTS (-3.2% ROI, n=112)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": _TENNIS + _ESPORTS + ("nba-", "wnba-", "mlb-"),     # #BreakTheBank: NBA -10% ROI, MLB -41% ROI (n=41), tennis -11%; NFL +27%, soccer kept (+2.9%)
     "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": _TENNIS + _ESPORTS + ("nhl-", "ufc-", "cfb-", "cbb-"),  # #Bc43: NFL/NBA/MLB only (soccer handled below)
@@ -1137,6 +1150,8 @@ def handle_trade(trade, label, wallet):
     if _is_prop_noise(title, event_slug):
         return
     if any(event_slug.startswith(p) for p in WALLET_BLOCK.get(wallet, ())):
+        return
+    if wallet in WALLET_ALLOW_SPORTS and _sport_of(event_slug) not in WALLET_ALLOW_SPORTS[wallet]:
         return
     if _sport_of(event_slug) in WALLET_BLOCK_SPORTS.get(wallet, ()):
         return
