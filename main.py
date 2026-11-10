@@ -15,11 +15,8 @@ WALLETS = {
     # Prober 2026-10-09: 4,794 markets / 3,420 wallets scanned, full-history trade-based CLV
     "0x924379a79c64b77ad5816ad362122a5f6228658e": "#KchTemp",          # 68% beat, +1.13% CLV (n=236, 0% live); NFL 78%/n55; $2.51M, avg $47k
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": "#BreakTheBank",     # 71% beat, +1.91% CLV (n=119); soccer +4.18%/71%, NFL 69%; $5.08M, avg $28k
-    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": "#Bc43",             # NFL 68%/n63, NBA 74%/n31; soccer/NHL blocked; +$1.19M 30d - TRIAL
     # Prober 2026-11-08 (Data API v2): 650 sports-leaderboard wallets -> 45d settled ROI -> pre-game CLV. TRIAL, regrade ~Dec 8
     "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": "#mde4life1986",     # CFB 91% beat / +7.8% CLV (n=57), NFL 69%; +20.9% ROI; bets ~6h pre-KO
-    "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": "#justwins",         # 67% beat / +0.7% CLV (n=105), +22.1% ROI, avg $37k; NBA/CFB/NFL/soccer
-    "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": "#Jsram",            # soccer 66% beat / +1.1% CLV (n=50), +39% ROI, avg $40k
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": "#drainedandpoor",   # NBA 70% beat / +1.9% CLV (n=80), +20% ROI; esports weak (blocked)
     # Discovery scan 2026-11-09 (first weekly run): only wallet of 357 to clear the bar
     "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": "#forecastication4", # NFL 82% beat / +2.5% med CLV / +24.6% ROI (n=73, since Jul 20); avg $2.6k; NFL only
@@ -49,10 +46,7 @@ WALLET_MIN_SIZE = {
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": 75000,  # #Whale2c33 (conviction floor; skips market-making)
     "0x924379a79c64b77ad5816ad362122a5f6228658e": 38000,  # #KchTemp (avg $47k; his >=80% bets beat close 74%)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 22000,  # #BreakTheBank (avg $28k)
-    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": 8000,   # #Bc43 (NFL avg $25k, NBA $3k)
     "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": 6300,   # #mde4life1986 (CFB/NFL avg $7.9k)
-    "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": 29000,  # #justwins (avg $36k)
-    "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": 32000,  # #Jsram (pre-game soccer avg $40k)
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": 11000,  # #drainedandpoor (NBA avg $13.7k)
     "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": 2050,   # #forecastication4 (NFL avg $2,560 -> 1u at $2,560, 2u at $5,125)
 }
@@ -63,14 +57,12 @@ _TENNIS  = ("atp-", "wta-")
 _ESPORTS = ("lol-", "cs-", "cs2-", "val-", "dota-", "esports-", "r6-", "rl-")
 # Sport-name blocks (for sports without a fixed slug prefix, e.g. soccer)
 WALLET_BLOCK_SPORTS = {
-    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": ("Soccer",),   # #Bc43: soccer 45% beat
     "0x924379a79c64b77ad5816ad362122a5f6228658e": ("Soccer",),   # #KchTemp: soccer -3.2% ROI on 112 bets (full on-chain history); NFL +32% / CFB +16% kept
 }
 
 # Allow-lists: if a wallet is listed here, ONLY these sports (_sport_of buckets) ever ping.
 WALLET_ALLOW_SPORTS = {
     "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": ("CFB", "NFL"),   # #mde4life1986: NBA 38% beat
-    "0x83720820a8aa6c3f20ad71850e7a1a17d16c5223": ("Soccer",),       # #Jsram
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": ("NBA",),          # #drainedandpoor: esports 57% beat
     "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": ("NFL",),          # #forecastication4: soccer 56% / NBA 58% beat, CFB flat CLV
 }
@@ -81,7 +73,6 @@ WALLET_BLOCK = {
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563": ("nfl-", "cfb-"),               # #Whale2c33: NFL 29% beat / -2.59% CLV, CFB 36% beat
     "0x924379a79c64b77ad5816ad362122a5f6228658e": _TENNIS + _ESPORTS + ("ufc-",),                     # #KchTemp: tennis -2.8% ROI; soccer blocked via WALLET_BLOCK_SPORTS (-3.2% ROI, n=112)
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": _TENNIS + _ESPORTS + ("nba-", "wnba-", "mlb-"),     # #BreakTheBank: NBA -10% ROI, MLB -41% ROI (n=41), tennis -11%; NFL +27%, soccer kept (+2.9%)
-    "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3": _TENNIS + _ESPORTS + ("nhl-", "ufc-", "cfb-", "cbb-", "nba-", "wnba-"),  # #Bc43: NFL/MLB only; NBA 49% beat / -33% ROI (60d regrade 2026-11-09)
 }
 
 # --- Runtime state -----------------------------------------------------------
@@ -1155,7 +1146,8 @@ def run_selfgrade(post=True, days=30):
             mine = [p for p in (wl if w in WATCH_WALLETS else wp) if p["wallet"] == w]
             s = _tail_summary(mine)
             o = get_official_pnl(w)
-            flag = (s["clv"] is not None and s["graded"] >= GRADE_FLAG_N and (s["beat"] < GRADE_FLAG_BEAT or s["clv_med"] < 0))
+            flag = (s["clv"] is not None and s["graded"] >= GRADE_FLAG_N and (s["beat"] < GRADE_FLAG_BEAT or s["clv_med"] < 0)) \
+                   or (o.get("all") is not None and o["all"] < 0)
             per.append({"label": label + (" (watch)" if w in WATCH_WALLETS else ""), "wallet": w, "tail": s, "lifetime": o.get("all"), "d30": o.get("d30"), "flag": flag,
                         "sports": {sp: _tail_summary([p for p in mine if p["sport"] == sp])
                                    for sp in sorted({p["sport"] for p in mine})}})
@@ -1183,7 +1175,7 @@ def run_selfgrade(post=True, days=30):
                         L.append(f"   ↳ {sp}: {zs} · _flat {s['graded']} · {s['roi']:+.1f}%_{c}")
             fl = [r["label"] for r in per if r["flag"]]
             L.append("")
-            L.append(f"⚠️ **Review:** {', '.join(fl)} (beat close < {GRADE_FLAG_BEAT}% or median CLV < 0 over {GRADE_FLAG_N}+ pings)" if fl
+            L.append(f"⚠️ **Review:** {', '.join(fl)} (beat close < {GRADE_FLAG_BEAT}% or median CLV < 0 over {GRADE_FLAG_N}+ pings, or lifetime P&L < 0)" if fl
                      else "✅ No wallet below the beat-close / CLV bar this week.")
             _post_long("\n".join(L))
         return res
@@ -1267,6 +1259,20 @@ def run_discovery(post=True, days=45):
             clv = sum(x["clv"] for x in pre) / len(pre)
             if beat < 62 or clv <= 0:
                 continue
+            # lifetime check (2026-11-10): must be profitable all-time and >= 90 days old; flag if the last 45d carries the account
+            try:
+                pts = (requests.get(DAPI + "user-pnl", params={"user": w, "interval": "all", "fidelity": "1d"}, timeout=20).json().get("data") or {}).get("points") or []
+            except Exception:
+                pts = []
+            if not pts:
+                continue
+            life = pts[-1].get("position_pnl") or 0
+            age = (time.time() - pts[0]["timestamp"]) / 86400
+            before = [p.get("position_pnl") or 0 for p in pts if p["timestamp"] <= time.time() - 45 * 86400]
+            prior = before[-1] if before else 0
+            if life <= 0 or age < 90:
+                continue
+            hot = prior < 0 or (life - prior) > 0.75 * life
             sports = []
             for sp, xs in sorted(by.items(), key=lambda kv: -len(kv[1])):
                 if len(xs) >= 10:
@@ -1275,6 +1281,7 @@ def run_discovery(post=True, days=45):
                     sr = 100 * sum(x["pnl"] for x in sv) / max(1, sum(x["usd"] for x in sv))
                     sports.append(f"{sp} {len(xs)}: {sb:.0f}% beat / {sum(x['clv'] for x in xs)/len(xs):+.1f}% CLV / {sr:+.0f}% ROI")
             out.append({"wallet": w, "name": cands[w]["name"], "n": len(pre), "beat": round(beat), "clv": round(clv, 2),
+                        "life": round(life), "prior45": round(prior), "age": round(age), "hot": hot,
                         "roi": round(100 * pnl / cost, 1), "avg": round(cost / n_set),
                         "mins": round(statistics.median(x["mins"] for x in pre)), "sports": sports})
         out.sort(key=lambda r: (-r["beat"], -r["clv"]))
@@ -1284,12 +1291,14 @@ def run_discovery(post=True, days=45):
         if post:
             L = [f"<@{DISCORD_USER_ID}>",
                  f"# \U0001f50e Weekly discovery scan",
-                 f"_{len(cands)} profitable sports-leaderboard wallets → {len(stage1)} passed settled ROI ({days}d) → graded on pre-game CLV. Bar: 62%+ beat close, CLV > 0, 30+ pre-game bets._"]
+                 f"_{len(cands)} profitable sports-leaderboard wallets → {len(stage1)} passed settled ROI ({days}d) → graded on pre-game CLV. Bar: 62%+ beat close, CLV > 0, 30+ pre-game bets, profitable lifetime, account 90+ days old._"]
             if not out:
                 L.append("No new wallet cleared the bar this week.")
             for r in out[:5]:
                 L.append(f"\n**{r['name'] or r['wallet'][:10]}** — <https://polymarket.com/profile/{r['wallet']}>")
                 L.append(f"{r['n']} pre-game bets · beat close **{r['beat']}%** · CLV **{r['clv']:+.2f}%** · ROI **{r['roi']:+.1f}%** · avg ${r['avg']:,} · bets ~{r['mins']} min pre-KO")
+                L.append(f"   lifetime P&L **${r['life']:+,}** (was ${r['prior45']:+,} 45 days ago) · account {r['age']} days old"
+                         + ("  ⚠️ **mostly made in the last 45 days — hot-streak risk, check per-sport lifetime before adding**" if r["hot"] else ""))
                 for s in r["sports"][:4]:
                     L.append(f"   ↳ {s}")
             L.append("\n_Reply in chat with who to add (and which sports) and it gets deployed._")
