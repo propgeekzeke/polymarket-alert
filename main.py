@@ -19,6 +19,7 @@ WALLETS = {
     "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": "#mde4life1986",     # CFB 91% beat / +7.8% CLV (n=57), NFL 69%; +20.9% ROI; bets ~6h pre-KO
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": "#drainedandpoor",   # NBA 70% beat / +1.9% CLV (n=80), +20% ROI; esports weak (blocked)
     # Discovery scan 2026-11-09 (first weekly run): only wallet of 357 to clear the bar
+    "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": "#justwins",         # re-added NFL-only 2026-11-10: NFL lifetime 62% beat / +0.93% CLV / +22% ROI (n=48); NBA lost $580k
     "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": "#forecastication4", # NFL 82% beat / +2.5% med CLV / +24.6% ROI (n=73, since Jul 20); avg $2.6k; NFL only
 }
 
@@ -48,6 +49,7 @@ WALLET_MIN_SIZE = {
     "0xf0318c32136c2db7fec88b84869aee6a1106c80c": 22000,  # #BreakTheBank (avg $28k)
     "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": 6300,   # #mde4life1986 (CFB/NFL avg $7.9k)
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": 11000,  # #drainedandpoor (NBA avg $13.7k)
+    "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": 29000,  # #justwins (NFL avg ~$38k)
     "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": 2050,   # #forecastication4 (NFL avg $2,560 -> 1u at $2,560, 2u at $5,125)
 }
 
@@ -64,7 +66,8 @@ WALLET_BLOCK_SPORTS = {
 WALLET_ALLOW_SPORTS = {
     "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": ("CFB", "NFL"),   # #mde4life1986: NBA 38% beat
     "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": ("NBA",),          # #drainedandpoor: esports 57% beat
-    "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": ("NFL",),          # #forecastication4: soccer 56% / NBA 58% beat, CFB flat CLV
+    "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": ("NFL",),          # #justwins: NBA -$580k lifetime, CBB -$127k
+    "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": ("NFL", "CFB"),   # #forecastication4: CFB lifetime 64% beat / +1.02% CLV / +18% ROI added 2026-11-10;          # #forecastication4: soccer 56% / NBA 58% beat, CFB flat CLV
 }
 
 WALLET_BLOCK = {
@@ -1037,7 +1040,7 @@ def replay_pings(days=30):
         for t in rows:
             events.append((t.get("timestamp") or 0, w, t))
     events.sort(key=lambda x: x[0])
-    prog, done, pidx = {}, set(), {}
+    prog, done, pidx, kst = {}, set(), {}, {}
     for ts, w, t in events:
         ev = t["eventSlug"]; g = G.get(ev)
         if g is None:
@@ -1050,11 +1053,13 @@ def replay_pings(days=30):
                 "cond": t.get("conditionId"), "px": px, "gs": gs, "sport": _sport_of(ev)}
         k = (w, ev, f"{out}@{t.get('conditionId') or ''}")
         prog[k] = prog.get(k, 0) + usd
+        st = kst.setdefault(k, {"fpx": px, "fts": ts, "lpx": px, "n": 0, "u": 0.0, "upx": 0.0})
+        st["lpx"] = px; st["n"] += 1; st["u"] += usd; st["upx"] += usd * px
         if k not in done:
             if prog[k] >= EARLY_ALERT_FRAC * WALLET_MIN_SIZE.get(w, MIN_SIZE):
                 done.add(k)
                 pings.append(dict(base, kind="watch" if w in WATCH_WALLETS else "wallet", wallet=w,
-                                  label=WALLETS[w], legs=[], placed=0.0, nextr=0.0))
+                                  label=WALLETS[w], legs=[], placed=0.0, nextr=0.0, kst=kst[k]))
                 pidx[k] = pings[-1]
         if k in pidx and t.get("asset") == pidx[k]["tok"]:
             # your scale-in: re-size each time he crosses another 0.5x of his average bet
@@ -1090,6 +1095,12 @@ def replay_pings(days=30):
                 if f is not None:
                     ps += rk * (f / lg["px"] - 1)
         p["units"] = p.pop("placed", 0); p.pop("nextr", None)
+        # bait: he walked his own price up 2c+ while filling, then it closed below his average entry
+        st = p.pop("kst", None)
+        if st:
+            vw = st["upx"] / st["u"] if st["u"] else e
+            p["vw"], p["first_ts"], p["size"] = vw, st["fts"], st["u"]
+            p["bait"] = bool(st["n"] >= 3 and st["lpx"] - st["fpx"] >= 0.02 and p["close"] is not None and p["close"] < vw - 0.005)
         p["risk_s"], p["pnl_s"] = rs, (ps if f is not None else None)
     # consensus pings: you bet the size of the biggest wallet on it (same scale-in legs)
     by_tok = {}
@@ -1103,6 +1114,51 @@ def replay_pings(days=30):
             best = max(cands, key=lambda c: c["risk_s"]) if cands else None
             p["risk_s"], p["pnl_s"] = (best["risk_s"], best["pnl_s"]) if best else (0.0, None)
     return pings
+
+
+def _counterparty_scan(pings, min_usd=5000):
+    """For each wallet's pinged markets: who took big size on the OTHER side between his first fill and kickoff?
+    A non-roster wallet that shows up on a large share of ONE wallet's markets (but not across the roster in general,
+    which would just be a market maker) is a possible linked / fade-the-followers account."""
+    now = time.time()
+    todo = [p for p in pings if p["kind"] in ("wallet", "watch") and p.get("cond") and p.get("gs") and p["gs"] < now and p.get("first_ts")]
+    roster = {w.lower() for w in WALLETS}
+
+    def one(p):
+        rows = _dapi("trades", {"condition": p["cond"], "limit": 1000, "taker_only": "false"}, max_rows=3000, timeout=20)
+        opp = {}
+        for r in rows:
+            ts = r.get("timestamp") or 0
+            if ts < p["first_ts"] or ts > p["gs"]:
+                continue
+            w = (r.get("proxyWallet") or "").lower()
+            if not w or w in roster:
+                continue
+            against = (r.get("side") == "BUY" and r.get("outcome") != p["out"]) or (r.get("side") == "SELL" and r.get("outcome") == p["out"])
+            if against:
+                opp[w] = opp.get(w, 0) + (r.get("size") or 0) * (r.get("price") or 0)
+        need = max(min_usd, 0.5 * (p.get("size") or 0))
+        return p["wallet"], p["cond"], {w for w, u in opp.items() if u >= need}
+    per, overall = {}, {}
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for w, cond, hits in ex.map(one, todo):
+            d = per.setdefault(w, {"markets": set(), "cp": {}})
+            d["markets"].add(cond)
+            for h in hits:
+                d["cp"].setdefault(h, set()).add(cond)
+                overall.setdefault(h, set()).add(cond)
+    all_markets = set().union(*[d["markets"] for d in per.values()]) if per else set()
+    out = {}
+    for w, d in per.items():
+        n = len(d["markets"]); flags = []
+        for h, ms in d["cp"].items():
+            share = len(ms) / n if n else 0
+            others = len(all_markets - d["markets"]) or 1
+            other_share = len(overall[h] - d["markets"]) / others
+            if len(ms) >= 5 and share >= 0.25 and other_share < share / 2:
+                flags.append({"wallet": h, "hits": len(ms), "of": n, "share": round(100 * share), "elsewhere": round(100 * other_share)})
+        out[w] = {"markets": n, "flags": sorted(flags, key=lambda f: -f["hits"])[:3]}
+    return out
 
 
 def _tail_summary(rows):
@@ -1146,11 +1202,27 @@ def run_selfgrade(post=True, days=30):
             mine = [p for p in (wl if w in WATCH_WALLETS else wp) if p["wallet"] == w]
             s = _tail_summary(mine)
             o = get_official_pnl(w)
+            # lifetime < 0 flags only for wallets we tail in every sport; for sport-filtered wallets it's a note
+            # (e.g. justwins is NFL-only because his NBA lost $580k - his overall lifetime will read negative)
             flag = (s["clv"] is not None and s["graded"] >= GRADE_FLAG_N and (s["beat"] < GRADE_FLAG_BEAT or s["clv_med"] < 0)) \
-                   or (o.get("all") is not None and o["all"] < 0)
+                   or (o.get("all") is not None and o["all"] < 0 and w not in WALLET_ALLOW_SPORTS)
             per.append({"label": label + (" (watch)" if w in WATCH_WALLETS else ""), "wallet": w, "tail": s, "lifetime": o.get("all"), "d30": o.get("d30"), "flag": flag,
                         "sports": {sp: _tail_summary([p for p in mine if p["sport"] == sp])
                                    for sp in sorted({p["sport"] for p in mine})}})
+        try:
+            cps = _counterparty_scan(wp + wl)
+        except Exception as e:
+            print(f"Counterparty scan error: {e}", flush=True); cps = {}
+        for r in per:
+            mine = [p for p in (wl if r["wallet"] in WATCH_WALLETS else wp) if p["wallet"] == r["wallet"]]
+            bt = [p for p in mine if p.get("bait") is not None and p.get("close") is not None]
+            r["bait_pct"] = round(100 * sum(1 for p in bt if p["bait"]) / len(bt)) if bt else None
+            r["bait_n"] = len(bt)
+            r["cp"] = cps.get(r["wallet"], {"markets": 0, "flags": []})
+            if (r["bait_pct"] or 0) >= 15 and len(bt) >= 10:
+                r["flag"] = True
+            if r["cp"]["flags"]:
+                r["flag"] = True
         per.sort(key=lambda r: -(r["tail"]["pnl"] or 0))
         res = {"updated": datetime.now(timezone.utc).isoformat(), "days": days, "secs": round(time.time() - t0),
                "all": _tail_summary(wp), "consensus": _tail_summary(cp), "wallets": per,
@@ -1166,7 +1238,14 @@ def run_selfgrade(post=True, days=30):
                  ""]
             for r in per:
                 lt = f"lifetime ${r['lifetime']:+,} · 30d ${r['d30']:+,}" if r.get("lifetime") is not None else ""
+                if r.get("lifetime") is not None and r["lifetime"] < 0 and r["wallet"] in WALLET_ALLOW_SPORTS:
+                    lt += f" (all sports; we only tail {'/'.join(WALLET_ALLOW_SPORTS[r['wallet']])})"
                 L.append(("⚠️ " if r["flag"] else "") + _fmt_tail(r["label"], r["tail"]) + (f" · _{lt}_" if lt else ""))
+                cpf = r.get("cp", {}).get("flags") or []
+                bait = f"bait {r['bait_pct']}% of {r['bait_n']}" if r.get("bait_pct") is not None else "bait n/a"
+                cpt = ("; ".join(f"**{f['wallet'][:10]}…** hit the other side on {f['hits']}/{f['of']} of his markets ({f['share']}% vs {f['elsewhere']}% elsewhere)" for f in cpf)
+                       if cpf else f"no repeat counterparty ({r.get('cp', {}).get('markets', 0)} markets checked)")
+                L.append(f"   🕵️ {bait} · {cpt}")
                 for sp, s in r["sports"].items():
                     if s["graded"] >= 5 and len(r["sports"]) > 1 and sp != "Other":
                         c = f" · CLV med {s['clv_med']:+.2f}% · beat {s['beat']}%" if s["clv"] is not None else ""
@@ -1175,7 +1254,7 @@ def run_selfgrade(post=True, days=30):
                         L.append(f"   ↳ {sp}: {zs} · _flat {s['graded']} · {s['roi']:+.1f}%_{c}")
             fl = [r["label"] for r in per if r["flag"]]
             L.append("")
-            L.append(f"⚠️ **Review:** {', '.join(fl)} (beat close < {GRADE_FLAG_BEAT}% or median CLV < 0 over {GRADE_FLAG_N}+ pings, or lifetime P&L < 0)" if fl
+            L.append(f"⚠️ **Review:** {', '.join(fl)} (beat close < {GRADE_FLAG_BEAT}% or median CLV < 0 over {GRADE_FLAG_N}+ pings, lifetime P&L < 0, bait ≥ 15%, or a repeat counterparty)" if fl
                      else "✅ No wallet below the beat-close / CLV bar this week.")
             _post_long("\n".join(L))
         return res
