@@ -1,5 +1,5 @@
 """PolyAlert v2 - pre-game sharp tailing: tailability check, consensus, CLV scoreboard."""
-import os, re, time, threading, requests, statistics, json, fcntl, unicodedata
+import os, re, time, threading, requests, statistics, json, fcntl, unicodedata, sys, subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from flask import Flask, jsonify
@@ -152,7 +152,7 @@ def _v1row(x):
     return d
 
 
-def _dapi(path, params, max_rows=None, timeout=15):
+def _dapi(path, params, max_rows=None, timeout=15, keep=None):
     """GET a Data API v2 route, follow cursors up to max_rows, return a list of v1-shaped rows ([] on failure)."""
     p0 = {k: v for k, v in params.items() if k != "offset" and v is not None}
     if "market" in p0:
@@ -177,7 +177,10 @@ def _dapi(path, params, max_rows=None, timeout=15):
         rows = j.get("data") or []
         if isinstance(rows, dict):
             return rows
-        out.extend(_v1row(x) for x in rows)
+        if keep:   # slim rows as they arrive - big replays (100k+ fills) otherwise blow the instance's memory
+            out.extend({k: v for k, v in _v1row(x).items() if k in keep} for x in rows)
+        else:
+            out.extend(_v1row(x) for x in rows)
         cursor = (j.get("pagination") or {}).get("next_cursor")
         if not cursor or not rows or (max_rows and len(out) >= max_rows):
             break
@@ -1016,6 +1019,9 @@ def _passes_filters(wallet, ev, title):
     return True
 
 
+_FILL_KEYS = {"side", "eventSlug", "title", "outcome", "usdcSize", "price", "timestamp", "conditionId", "asset", "size", "proxyWallet"}
+
+
 def replay_pings(days=30):
     """Re-run every roster wallet's BUY fills through the live ping rules (filters, thresholds, EARLY_ALERT_FRAC,
     consensus) and grade each ping at the price it fired: CLV vs close + settled result at TAIL_STAKE sizing."""
@@ -1023,7 +1029,7 @@ def replay_pings(days=30):
     fills = {}
     for w in WALLETS:
         rows = _dapi("activity", {"user": w, "type": "TRADE", "side": "BUY", "start": start, "limit": 1000},
-                     max_rows=80000, timeout=40)
+                     max_rows=80000, timeout=40, keep=_FILL_KEYS)
         fills[w] = [t for t in rows if t.get("side") == "BUY" and _passes_filters(w, t.get("eventSlug") or "", t.get("title") or "")]
     # only events where some key could reach a ping need a game time
     need, tot = set(), {}
@@ -1125,7 +1131,8 @@ def _counterparty_scan(pings, min_usd=5000):
     roster = {w.lower() for w in WALLETS}
 
     def one(p):
-        rows = _dapi("trades", {"condition": p["cond"], "limit": 1000, "taker_only": "false"}, max_rows=3000, timeout=20)
+        rows = _dapi("trades", {"condition": p["cond"], "limit": 1000, "taker_only": "false"}, max_rows=2000, timeout=20,
+                     keep={"proxyWallet", "side", "outcome", "size", "price", "timestamp"})
         opp = {}
         for r in rows:
             ts = r.get("timestamp") or 0
@@ -1140,7 +1147,7 @@ def _counterparty_scan(pings, min_usd=5000):
         need = max(min_usd, 0.5 * (p.get("size") or 0))
         return p["wallet"], p["cond"], {w for w, u in opp.items() if u >= need}
     per, overall = {}, {}
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         for w, cond, hits in ex.map(one, todo):
             d = per.setdefault(w, {"markets": set(), "cp": {}})
             d["markets"].add(cond)
@@ -1389,6 +1396,49 @@ def run_discovery(post=True, days=45):
         reports["running"].discard("discovery")
 
 
+# Heavy reports run in a CHILD process (2026-11-10: a 30-day self-grade + counterparty scan ran the web instance out of
+# memory and restarted the bot). The child posts to Discord itself, writes its result to /tmp, then exits so the memory
+# is returned; if it ever dies, only the report is lost - the monitor keeps running.
+_report_procs = {}
+
+
+def _report_file(kind):
+    return f"/tmp/polyalert_report_{kind}.json"
+
+
+def _report_child(kind, post):
+    res = run_selfgrade(post=post) if kind == "selfgrade" else run_discovery(post=post)
+    if res:
+        with open(_report_file(kind) + ".tmp", "w") as fh:
+            json.dump(res, fh, default=str)
+        os.replace(_report_file(kind) + ".tmp", _report_file(kind))
+
+
+def start_report(kind, post=True):
+    p = _report_procs.get(kind)
+    if p and p.poll() is None:
+        return False
+    here = os.path.dirname(os.path.abspath(__file__))
+    mod = os.path.splitext(os.path.basename(__file__))[0]
+    code = f"import sys; sys.path.insert(0, {here!r}); import {mod} as m; m._report_child({kind!r}, {bool(post)!r})"
+    _report_procs[kind] = subprocess.Popen([sys.executable, "-c", code], cwd=here)
+    print(f"Started {kind} report in child pid={_report_procs[kind].pid}", flush=True)
+    return True
+
+
+def report_running(kind):
+    p = _report_procs.get(kind)
+    return bool(p and p.poll() is None)
+
+
+def load_report(kind):
+    try:
+        with open(_report_file(kind)) as fh:
+            return json.load(fh)
+    except Exception:
+        return reports.get(kind)
+
+
 def _report_scheduler():
     """Mondays: self-grade at REPORT_HOUR_UTC, discovery an hour later. Checked every 10 min."""
     while True:
@@ -1398,10 +1448,12 @@ def _report_scheduler():
             if now.weekday() == REPORT_WEEKDAY:
                 if now.hour >= REPORT_HOUR_UTC and report_state.get("selfgrade_day") != day:
                     report_state["selfgrade_day"] = day; save_state()
-                    run_selfgrade(post=True)
+                    start_report("selfgrade", post=True)
                 if now.hour >= REPORT_HOUR_UTC + 1 and report_state.get("discovery_day") != day:
                     report_state["discovery_day"] = day; save_state()
-                    run_discovery(post=True)
+                    while report_running("selfgrade"):
+                        time.sleep(30)
+                    start_report("discovery", post=True)
         except Exception as e:
             print(f"Report scheduler error: {e}", flush=True)
         time.sleep(600)
@@ -2216,10 +2268,10 @@ def report_selfgrade():
     """Last weekly self-grade. ?run=1 starts a fresh one in the background (?post=1 also posts it to Discord)."""
     from flask import request
     ensure_monitor()
-    if request.args.get("run") == "1" and "selfgrade" not in reports["running"]:
-        threading.Thread(target=run_selfgrade, kwargs={"post": request.args.get("post") == "1"}, daemon=True).start()
-    r = reports["selfgrade"]
-    return jsonify({"running": "selfgrade" in reports["running"],
+    if request.args.get("run") == "1":
+        start_report("selfgrade", post=request.args.get("post") == "1")
+    r = load_report("selfgrade")
+    return jsonify({"running": report_running("selfgrade"),
                     "report": {k: v for k, v in r.items() if k != "pings"} if r else None})
 
 
@@ -2227,18 +2279,18 @@ def report_selfgrade():
 def report_discovery():
     from flask import request
     ensure_monitor()
-    if request.args.get("run") == "1" and "discovery" not in reports["running"]:
-        threading.Thread(target=run_discovery, kwargs={"post": request.args.get("post") == "1"}, daemon=True).start()
-    return jsonify({"running": "discovery" in reports["running"], "report": reports["discovery"]})
+    if request.args.get("run") == "1":
+        start_report("discovery", post=request.args.get("post") == "1")
+    return jsonify({"running": report_running("discovery"), "report": load_report("discovery")})
 
 
 @app.route("/tail")
 def tail():
     """Live tail tracker: every ping in the last self-grade window, graded at the ping price."""
     ensure_monitor()
-    r = reports["selfgrade"]
+    r = load_report("selfgrade")
     if not r:
-        return jsonify({"note": "no self-grade yet - hit /report/selfgrade?run=1", "running": "selfgrade" in reports["running"]})
+        return jsonify({"note": "no self-grade yet - hit /report/selfgrade?run=1", "running": report_running("selfgrade")})
     return jsonify({"updated": r["updated"], "all": r["all"], "consensus": r["consensus"],
                     "by_wallet": {w["label"]: w["tail"] for w in r["wallets"]}, "pings": r["pings"][:300]})
 
