@@ -1396,6 +1396,233 @@ def run_discovery(post=True, days=45):
         reports["running"].discard("discovery")
 
 
+# --- Per-sport wallet grader (lifetime + last 45 days) ------------------------
+# Uses the positions endpoint (one row per market a wallet ever held) instead of raw fills, so even 700k-fill wallets
+# grade in a few minutes. Entry = the position's average price; pre-game = first entry before kickoff.
+GRADE_FLOOR_FRAC = 0.25   # only bets >= 25% of the wallet's alert size (his real plays) are graded
+BAR = {"life_n": 20, "life_beat": 58, "recent_n": 8, "recent_beat": 55}
+
+
+def _wallet_positions(w):
+    keep = {"asset", "conditionId", "eventSlug", "title", "outcome", "avgPrice", "totalBought", "cashPnl", "first_entry_at", "status"}
+    seen = {}
+    for st in ("OPEN", "REDEEMABLE", "CLOSED"):
+        # the OPEN list also returns unredeemed resolved positions -> dedupe by token so losses aren't counted twice
+        for r in _dapi("positions", {"user": w, "status": st, "limit": 1000}, max_rows=40000, timeout=40, keep=keep):
+            seen.setdefault(r.get("asset"), r)
+    return list(seen.values())
+
+
+def grade_wallet_sports(w, floor, only_sports=None, recent_days=45):
+    """-> {sport: {"life": {...}, "recent": {...}, "pass_life": bool, "pass_recent": bool}}"""
+    now = time.time(); cut = now - recent_days * 86400
+    pos = []
+    for p in _wallet_positions(w):
+        ev = p.get("eventSlug") or ""; sp = _sport_of(ev)
+        cost = (p.get("totalBought") or 0) * (p.get("avgPrice") or 0)
+        if sp == "Other" or cost < floor or not 0.03 < (p.get("avgPrice") or 0) < 0.97:
+            continue
+        if only_sports and sp not in only_sports:
+            continue
+        if _is_futures(p.get("title"), ev) or _is_prop_noise(p.get("title"), ev):
+            continue
+        pos.append(dict(p, sp=sp, cost=cost))
+    G = _gamma_event_starts({p["eventSlug"] for p in pos}, workers=8)
+    pairs = set()
+    for p in pos:
+        p["gs"] = G.get(p["eventSlug"], {}).get("m", {}).get(p["conditionId"])
+        if p["gs"] and (p.get("first_entry_at") or 9e12) < p["gs"] < now:
+            pairs.add((p["asset"], p["gs"]))
+    cl = _closes(pairs, workers=8)
+    by = {}
+    for p in pos:
+        if (p["asset"], p.get("gs")) not in pairs:
+            continue
+        c = cl.get(p["asset"]); e = p["avgPrice"]
+        settled = p.get("status") in ("CLOSED", "REDEEMABLE")
+        by.setdefault(p["sp"], []).append({"clv": (c / e - 1) * 100 if c and c > 0 else None, "cost": p["cost"],
+                                           "pnl": p.get("cashPnl") if settled else None, "recent": p["gs"] >= cut})
+    def summ(r):
+        c = [x["clv"] for x in r if x["clv"] is not None]; s = [x for x in r if x["pnl"] is not None]
+        st = sum(x["cost"] for x in s); pn = sum(x["pnl"] or 0 for x in s)
+        return {"avg": round(sum(x["cost"] for x in r) / len(r)) if r else 0, "n": len(c), "beat": round(100 * sum(1 for y in c if y > 0) / len(c)) if c else None,
+                "clv": round(statistics.median(c), 2) if c else None, "roi": round(100 * pn / st, 1) if st else None, "pnl": round(pn)}
+    out = {}
+    for sp, r in by.items():
+        L, R = summ(r), summ([x for x in r if x["recent"]])
+        pl = bool(L["n"] >= BAR["life_n"] and L["beat"] is not None and L["beat"] >= BAR["life_beat"] and L["clv"] > 0 and (L["roi"] or 0) > 0)
+        pr = bool(R["n"] >= BAR["recent_n"] and R["beat"] is not None and R["beat"] >= BAR["recent_beat"] and R["clv"] > 0)
+        out[sp] = {"life": L, "recent": R, "pass_life": pl, "pass_recent": pr,
+                   "recent_thin": R["n"] < BAR["recent_n"]}
+    return out
+
+
+# --- Weekly job: roster review + discovery. Posts to Discord ONLY when a decision is needed -------------------------
+# Decisions you've already made, so the same question isn't asked every week. Key: "wallet|SPORT|action" -> "no".
+# action: drop (stop pinging this sport), add (start pinging this sport), enable (watch wallet back on), new (new wallet)
+DECISIONS = {}
+_SPORT_SLUG = {"NFL": "nfl-aa-bb-2026-01-01", "CFB": "cfb-aa-bb-2026-01-01", "NBA": "nba-aa-bb-2026-01-01",
+               "NHL": "nhl-aa-bb-2026-01-01", "MLB": "mlb-aa-bb-2026-01-01", "CBB": "cbb-aa-bb-2026-01-01",
+               "Tennis": "atp-aa-bb-2026-01-01", "Esports": "lol-aa-bb-2026-01-01", "MMA": "ufc-aa-bb-2026-01-01",
+               "Soccer": "epl-aa-bb-2026-01-01", "WNBA": "wnba-aa-bb-2026-01-01"}
+
+
+def sport_is_pinged(w, sp):
+    slug = _SPORT_SLUG.get(sp)
+    return bool(slug) and _passes_filters(w, slug, "A vs. B") and w not in WATCH_WALLETS
+
+
+def _decided(w, sp, action):
+    return DECISIONS.get(f"{w}|{sp}|{action}") == "no"
+
+
+def _fmt_grade(sp, v):
+    L, R = v["life"], v["recent"]
+    rec = f"last 45d {R['beat']}% / {R['clv']:+.2f}% (n={R['n']})" if R["n"] else "last 45d: no bets"
+    roi = f"{L['roi']:+.1f}%" if L["roi"] is not None else "n/a"
+    return f"**{sp}** lifetime {L['beat']}% beat / {L['clv']:+.2f}% CLV / {roi} ROI (n={L['n']}) · {rec}"
+
+
+def review_roster():
+    actions, detail = [], {}
+    sg = None
+    try:
+        sg = run_selfgrade(post=False)          # 30-day replay: bait + repeat-counterparty checks
+    except Exception as e:
+        print(f"weekly self-grade error: {e}", flush=True)
+    sgw = {r["wallet"]: r for r in (sg or {}).get("wallets", [])}
+    for w, label in WALLETS.items():
+        floor = max(1000, GRADE_FLOOR_FRAC * WALLET_MIN_SIZE.get(w, MIN_SIZE))
+        try:
+            grades = grade_wallet_sports(w, floor)
+        except Exception as e:
+            print(f"grade error {label}: {e}", flush=True); continue
+        detail[label] = grades
+        pinged = [sp for sp in grades if sport_is_pinged(w, sp)]
+        if w in WATCH_WALLETS:
+            ok = [sp for sp, v in grades.items() if v["pass_life"] and v["pass_recent"] and not _decided(w, sp, "enable")]
+            if ok:
+                actions.append({"type": "enable", "wallet": w, "label": label, "sports": ok,
+                                "why": [_fmt_grade(sp, grades[sp]) for sp in ok]})
+            continue
+        drop = [sp for sp in pinged if grades[sp]["life"]["n"] >= BAR["life_n"]
+                and (not grades[sp]["pass_life"] or (not grades[sp]["recent_thin"] and not grades[sp]["pass_recent"]))
+                and not _decided(w, sp, "drop")]
+        keep = [sp for sp in pinged if sp not in drop]
+        if drop:
+            actions.append({"type": "drop", "wallet": w, "label": label, "sports": drop, "remove_wallet": not keep,
+                            "why": [_fmt_grade(sp, grades[sp]) for sp in drop]})
+        add = [sp for sp, v in grades.items() if sp not in pinged and v["pass_life"] and v["pass_recent"] and not _decided(w, sp, "add")]
+        if add:
+            actions.append({"type": "add", "wallet": w, "label": label, "sports": add,
+                            "why": [_fmt_grade(sp, grades[sp]) for sp in add]})
+        r = sgw.get(w) or {}
+        if (r.get("bait_pct") or 0) >= 15 and (r.get("bait_n") or 0) >= 10 and not _decided(w, "ALL", "bait"):
+            actions.append({"type": "bait", "wallet": w, "label": label, "why": [f"{r['bait_pct']}% of his last {r['bait_n']} pinged bets: he pushed his own price 2c+ and it closed below his entry"]})
+        for f in (r.get("cp") or {}).get("flags") or []:
+            if not _decided(w, f["wallet"], "cp"):
+                actions.append({"type": "cp", "wallet": w, "label": label, "why": [f"{f['wallet']} took big size against him on {f['hits']}/{f['of']} of his markets ({f['share']}% vs {f['elsewhere']}% for other wallets)"]})
+    return actions, detail
+
+
+def discover_new(days=45, max_grade=15):
+    roster = {w.lower() for w in WALLETS}
+    cands = {}
+    for tp in ("month", "week"):
+        for sb in ("PNL", "VOLUME"):
+            for r in _dapi("leaderboard", {"time_period": tp, "category": "sports", "sort_by": sb, "limit": 100}, max_rows=300):
+                w = (r.get("user_id") or "").lower()
+                if w and w not in roster:
+                    c = cands.setdefault(w, {"name": r.get("user_name"), "pnl": 0, "vol": 0})
+                    c["pnl"] = max(c["pnl"], r.get("pnl") or 0); c["vol"] = max(c["vol"], r.get("volume") or 0)
+    cands = {w: c for w, c in cands.items() if c["pnl"] > 0 and c["vol"] >= 300000 and not _decided(w, "ALL", "new")}
+    start = int(time.time()) - days * 86400
+
+    def pull(w):   # cheap first pass: settled ROI on $1k+ pre-game-ish buys in the window
+        rows = _dapi("activity", {"user": w, "type": "TRADE", "start": start, "limit": 1000}, max_rows=5000, timeout=30, keep=_FILL_KEYS)
+        agg, sells, buys = {}, 0.0, 0.0
+        for t in rows:
+            u = t.get("usdcSize") or 0
+            if t.get("side") != "BUY":
+                sells += u; continue
+            buys += u
+            a = agg.setdefault(t.get("asset"), {"usd": 0, "sh": 0, "ev": t.get("eventSlug") or "", "cond": t.get("conditionId")})
+            a["usd"] += u; a["sh"] += t.get("size") or 0
+        return w, {"pos": {k: v for k, v in agg.items() if v["usd"] >= 1000 and v["sh"] > 0 and _sport_of(v["ev"]) != "Other"},
+                   "sell_ratio": sells / buys if buys else 0}
+    data = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for w, v in ex.map(pull, list(cands)):
+            data[w] = v
+    fin = _settlements([p["cond"] for v in data.values() for p in v["pos"].values()])
+    stage1 = []
+    for w, v in data.items():
+        st = [(t, p) for t, p in v["pos"].items() if fin.get(t) is not None]
+        if len(st) < 20 or v["sell_ratio"] >= 0.25:
+            continue
+        cost = sum(p["usd"] for _, p in st); pnl = sum(p["sh"] * fin[t] - p["usd"] for t, p in st)
+        hi = sum(1 for _, p in st if p["usd"] / p["sh"] >= 0.85) / len(st)
+        if cost / len(st) < 2000 or pnl / cost < 0.0 or hi >= 0.25:
+            continue
+        stage1.append((pnl / cost * min(1, len(st) / 100), w, cost / len(st)))
+    out = []
+    for _, w, avg in sorted(stage1, reverse=True)[:max_grade]:
+        try:
+            pts = (requests.get(DAPI + "user-pnl", params={"user": w, "interval": "all", "fidelity": "1d"}, timeout=20).json().get("data") or {}).get("points") or []
+        except Exception:
+            pts = []
+        if not pts:
+            continue
+        life = pts[-1].get("position_pnl") or 0; age = (time.time() - pts[0]["timestamp"]) / 86400
+        if life <= 0 or age < 90:
+            continue
+        try:
+            grades = grade_wallet_sports(w, max(1000, 0.2 * avg))
+        except Exception as e:
+            print(f"discover grade error {w}: {e}", flush=True); continue
+        ok = [sp for sp, v in grades.items() if v["pass_life"] and v["pass_recent"]]
+        if not ok:
+            continue
+        sport_avg = sum(grades[sp]["life"]["avg"] * grades[sp]["life"]["n"] for sp in ok) / max(1, sum(grades[sp]["life"]["n"] for sp in ok))
+        out.append({"type": "new", "wallet": w, "label": cands[w]["name"] or w[:10], "sports": ok,
+                    "life_pnl": round(life), "age": round(age), "threshold": int(round(0.8 * sport_avg, -2)),
+                    "why": [_fmt_grade(sp, grades[sp]) for sp in ok]})
+    return out, {"scanned": len(cands), "stage1": len(stage1)}
+
+
+def run_weekly(post=True):
+    t0 = time.time()
+    actions, detail = review_roster()
+    try:
+        new, meta = discover_new()
+    except Exception as e:
+        print(f"discovery error: {e}", flush=True); new, meta = [], {}
+    actions += new
+    res = {"updated": datetime.now(timezone.utc).isoformat(), "secs": round(time.time() - t0), "actions": actions,
+           "roster": detail, "discovery": meta}
+    if post and actions:
+        icon = {"drop": "\U0001f53b", "add": "\U0001f53a", "enable": "\U0001f504", "new": "\U0001f195", "bait": "\U0001f6a9", "cp": "\U0001f6a9"}
+        L = [f"<@{DISCORD_USER_ID}>", "# \U0001f6ce\ufe0f Action needed — reply to Claude with yes/no for each", ""]
+        for i, a in enumerate(actions, 1):
+            if a["type"] == "drop":
+                head = (f"REMOVE **{a['label']}**" if a["remove_wallet"] else f"Stop pinging {a['label']} for {', '.join(a['sports'])}")
+            elif a["type"] == "add":
+                head = f"Also ping {a['label']} for {', '.join(a['sports'])}"
+            elif a["type"] == "enable":
+                head = f"Turn {a['label']} back on (watch → active) for {', '.join(a['sports'])}"
+            elif a["type"] == "new":
+                head = (f"ADD **{a['label']}** for {', '.join(a['sports'])} — lifetime ${a['life_pnl']:+,}, account {a['age']}d old, "
+                        f"alert threshold ~${a['threshold']:,} · <https://polymarket.com/profile/{a['wallet']}>")
+            else:
+                head = f"Possible bait / linked account on {a['label']}"
+            L.append(f"**{i}.** {icon.get(a['type'], '')} {head}")
+            for y in a["why"]:
+                L.append(f"   ↳ {y}")
+        _post_long("\n".join(L))
+    return res
+
+
+
 # Heavy reports run in a CHILD process (2026-11-10: a 30-day self-grade + counterparty scan ran the web instance out of
 # memory and restarted the bot). The child posts to Discord itself, writes its result to /tmp, then exits so the memory
 # is returned; if it ever dies, only the report is lost - the monitor keeps running.
@@ -1407,7 +1634,14 @@ def _report_file(kind):
 
 
 def _report_child(kind, post):
-    res = run_selfgrade(post=post) if kind == "selfgrade" else run_discovery(post=post)
+    if kind == "weekly":
+        res = run_weekly(post=post)
+        if reports.get("selfgrade"):     # keep /tail and /report/selfgrade current from the same run
+            with open(_report_file("selfgrade") + ".tmp", "w") as fh:
+                json.dump(reports["selfgrade"], fh, default=str)
+            os.replace(_report_file("selfgrade") + ".tmp", _report_file("selfgrade"))
+    else:
+        res = run_selfgrade(post=post) if kind == "selfgrade" else run_discovery(post=post)
     if res:
         with open(_report_file(kind) + ".tmp", "w") as fh:
             json.dump(res, fh, default=str)
@@ -1440,20 +1674,15 @@ def load_report(kind):
 
 
 def _report_scheduler():
-    """Mondays: self-grade at REPORT_HOUR_UTC, discovery an hour later. Checked every 10 min."""
+    """Mondays at REPORT_HOUR_UTC: one silent weekly job (roster review + discovery). It only posts to Discord when
+    there's a decision for you (add / remove / re-enable a wallet or sport). Checked every 10 min."""
     while True:
         try:
             now = datetime.now(timezone.utc)
             day = now.strftime("%Y-%m-%d")
-            if now.weekday() == REPORT_WEEKDAY:
-                if now.hour >= REPORT_HOUR_UTC and report_state.get("selfgrade_day") != day:
-                    report_state["selfgrade_day"] = day; save_state()
-                    start_report("selfgrade", post=True)
-                if now.hour >= REPORT_HOUR_UTC + 1 and report_state.get("discovery_day") != day:
-                    report_state["discovery_day"] = day; save_state()
-                    while report_running("selfgrade"):
-                        time.sleep(30)
-                    start_report("discovery", post=True)
+            if now.weekday() == REPORT_WEEKDAY and now.hour >= REPORT_HOUR_UTC and report_state.get("weekly_day") != day:
+                report_state["weekly_day"] = day; save_state()
+                start_report("weekly", post=True)
         except Exception as e:
             print(f"Report scheduler error: {e}", flush=True)
         time.sleep(600)
@@ -2273,6 +2502,16 @@ def report_selfgrade():
     r = load_report("selfgrade")
     return jsonify({"running": report_running("selfgrade"),
                     "report": {k: v for k, v in r.items() if k != "pings"} if r else None})
+
+
+@app.route("/report/weekly")
+def report_weekly():
+    """Last weekly job: pending actions + full per-sport grades. ?run=1 starts one (?post=1 also posts actions)."""
+    from flask import request
+    ensure_monitor()
+    if request.args.get("run") == "1":
+        start_report("weekly", post=request.args.get("post") == "1")
+    return jsonify({"running": report_running("weekly"), "report": load_report("weekly")})
 
 
 @app.route("/report/discovery")
