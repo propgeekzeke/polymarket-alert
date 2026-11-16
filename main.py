@@ -33,7 +33,8 @@ EDIT_MIN_GAP = 8         # seconds between Discord message edits per position
 UNIT       = 1000        # 1u = to-win $1k on favorites (>50c), risk $1k on dogs
 SIZE_CAP   = 2.0         # max units
 # Watch-only: still graded in the weekly self-grade, but never pinged (incl. consensus)
-WATCH_WALLETS = {"0x076daa87c4fe1a85402a9b6b8e0a866224388d4c"}   # #Sharp076d: watch until ~Dec 9 (30d CLV/ROI slump)
+WATCH_WALLETS = {"0x076daa87c4fe1a85402a9b6b8e0a866224388d4c",   # #Sharp076d: watch until ~Dec 9 (30d CLV/ROI slump)
+                 "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"}   # #Whale2c33: watch from 2026-11-16 - beats close but pre-game ROI < 0 in NBA/soccer/tennis
 MIN_SIZE = 10000
 CONSENSUS_MIN = 1000     # any tracked-wallet pre-game BUY >= this counts toward consensus
 TAIL_OK_PP = 1.0         # current price within this of entry -> tailable
