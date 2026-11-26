@@ -60,15 +60,15 @@ _TENNIS  = ("atp-", "wta-")
 _ESPORTS = ("lol-", "cs-", "cs2-", "val-", "dota-", "esports-", "r6-", "rl-")
 # Sport-name blocks (for sports without a fixed slug prefix, e.g. soccer)
 WALLET_BLOCK_SPORTS = {
-    "0x924379a79c64b77ad5816ad362122a5f6228658e": ("Soccer",),   # #KchTemp: soccer -3.2% ROI on 112 bets (full on-chain history); NFL +32% / CFB +16% kept
 }
 
 # Allow-lists: if a wallet is listed here, ONLY these sports (_sport_of buckets) ever ping.
 WALLET_ALLOW_SPORTS = {
     "0x54ce7dd357766fc3255645e55ef41edd51cc9f80": ("CFB", "NFL"),   # #mde4life1986: NBA 38% beat
-    "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": ("NBA",),          # #drainedandpoor: esports 57% beat
+    "0x924379a79c64b77ad5816ad362122a5f6228658e": ("NFL", "Soccer"),       # #KchTemp (2026-11-26): CFB dropped (51% beat lifetime), soccer added (59% / +0.77% / +6.7%, n=181)
+    "0x5e6e2c3f06686f2607b86c90e35f536e81a1be00": ("NBA", "Esports"),      # #drainedandpoor: esports added 2026-11-26 (64% beat / +0.96% / +3.8%, n=504)
     "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc": ("NFL",),          # #justwins: NBA -$580k lifetime, CBB -$127k
-    "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": ("NFL", "CFB"),   # #forecastication4: CFB lifetime 64% beat / +1.02% CLV / +18% ROI added 2026-11-10;          # #forecastication4: soccer 56% / NBA 58% beat, CFB flat CLV
+    "0x885ffdf360e5b0b6e6acb963fb3f8ba2344c8ed9": ("NFL", "CFB", "MLB"),   # MLB added 2026-11-26 (67% / +1.61% / +27%, n=111);   # #forecastication4: CFB lifetime 64% beat / +1.02% CLV / +18% ROI added 2026-11-10;          # #forecastication4: soccer 56% / NBA 58% beat, CFB flat CLV
 }
 
 WALLET_BLOCK = {
@@ -1461,7 +1461,10 @@ def grade_wallet_sports(w, floor, only_sports=None, recent_days=45):
 # --- Weekly job: roster review + discovery. Posts to Discord ONLY when a decision is needed -------------------------
 # Decisions you've already made, so the same question isn't asked every week. Key: "wallet|SPORT|action" -> "no".
 # action: drop (stop pinging this sport), add (start pinging this sport), enable (watch wallet back on), new (new wallet)
-DECISIONS = {}
+DECISIONS = {
+    # 2026-11-26: high-frequency $86M-volume trader (-$1.7M lifetime) on both sides of everything - not linked to mde4life1986
+    "0x54ce7dd357766fc3255645e55ef41edd51cc9f80|0xdc41c39b95453c943174f369926018f6963bdd7e|cp": "no",
+}
 _SPORT_SLUG = {"NFL": "nfl-aa-bb-2026-01-01", "CFB": "cfb-aa-bb-2026-01-01", "NBA": "nba-aa-bb-2026-01-01",
                "NHL": "nhl-aa-bb-2026-01-01", "MLB": "mlb-aa-bb-2026-01-01", "CBB": "cbb-aa-bb-2026-01-01",
                "Tennis": "atp-aa-bb-2026-01-01", "Esports": "lol-aa-bb-2026-01-01", "MMA": "ufc-aa-bb-2026-01-01",
